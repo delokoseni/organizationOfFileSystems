@@ -61,7 +61,7 @@ class FilesystemConsistencyServiceTest {
                 .filter(text -> text.contains("Количество секторов NTFS отличается"))
                 .findFirst().orElseThrow();
 
-        assertTrue(boundary.contains("Совпадение отдельной копии не доказывает"));
+        assertTrue(boundary.contains("не доказывает, что граница области Windows"));
         assertEquals(DiagnosticSeverity.WARNING, new DiagnosticService()
                 .classify("NTFS", java.util.List.of(boundary)).getFirst().severity());
     }
@@ -168,7 +168,10 @@ class FilesystemConsistencyServiceTest {
         assertTrue(evidenceText.contains(
                 "непрочитанные абсолютные LBA: [1020, 1021, 1022, 1023]"));
         assertTrue(evidenceText.contains("Проверка хвостовой области была ограничена или неполна"));
-        assertTrue(evidenceText.contains("не доказывает корректность границы"));
+        String boundaryText = diagnostics.stream()
+                .filter(text -> text.contains("Количество секторов NTFS отличается"))
+                .findFirst().orElseThrow();
+        assertTrue(boundaryText.contains("не доказывает, что граница области Windows"));
     }
 
     @Test

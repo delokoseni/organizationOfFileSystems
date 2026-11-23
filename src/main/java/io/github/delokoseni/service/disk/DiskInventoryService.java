@@ -137,7 +137,7 @@ public final class DiskInventoryService {
             try {
                 physicalSectorSize = reader.readPhysicalSectorSize();
             } catch (IOException e) {
-                diskMessages.add("Размер физического сектора недоступен: " + e.getMessage());
+                diskMessages.add("Размер физического сектора не удалось получить с устройства: " + e.getMessage());
             }
 
             PartitionTableAnalysis partitionTable = null;

@@ -204,7 +204,8 @@ public final class FilesystemConsistencyService {
             message.append(' ').append(describeBackupEvidence(backupEvidence));
         }
         message.append(" Причина расхождения не установлена; предупреждение сохраняется. "
-                + "Совпадение отдельной копии не доказывает корректность границы NTFS.");
+                + "Совпадение резервной загрузочной записи с основной на конце области Windows "
+                + "не доказывает, что граница области Windows является корректной границей тома NTFS.");
         return message.toString();
     }
 
@@ -224,8 +225,7 @@ public final class FilesystemConsistencyService {
                 + evidence.otherTrailingAbsoluteDiskLbas() + "; непрочитанные абсолютные LBA: "
                 + evidence.unreadableTrailingAbsoluteDiskLbas() + ". "
                 + (evidence.trailingInspectionComplete()
-                ? "Хвостовая область прочитана полностью. "
-                : "Проверка хвостовой области была ограничена или неполна. ")
-                + "Совпадение отдельной копии не доказывает корректность границы NTFS.";
+                ? "Хвостовая область прочитана полностью."
+                : "Проверка хвостовой области была ограничена или неполна.");
     }
 }

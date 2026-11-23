@@ -33,7 +33,7 @@ class NtfsAnalysisReadinessTest {
                 "Размер физического сектора недоступен"));
 
         assertTrue(findings.stream().anyMatch(finding -> finding.severity() == DiagnosticSeverity.WARNING));
-        assertTrue(findings.stream().anyMatch(finding -> finding.severity() == DiagnosticSeverity.UNAVAILABLE));
+        assertTrue(findings.stream().anyMatch(finding -> finding.severity() == DiagnosticSeverity.INFORMATION));
         assertTrue(NtfsAnalysisReadiness.evaluate(volume, List.of(volume)).available());
     }
 

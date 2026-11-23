@@ -122,6 +122,8 @@ public final class WindowsVolumeService {
                 physicalSectorSize = OptionalInt.of(reader.readPhysicalSectorSize());
             } catch (IOException e) {
                 physicalSectorSize = OptionalInt.empty();
+                verificationDiagnostics.add("Размер физического сектора не удалось получить с устройства: "
+                        + e.getMessage());
             }
 
             List<WindowsPartitionInfo> windowsPartitions = List.of();

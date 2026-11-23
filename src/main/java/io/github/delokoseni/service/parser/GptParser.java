@@ -298,7 +298,9 @@ public final class GptParser {
             long firstLba = u32(mbr, offset + 8);
             long sectors = u32(mbr, offset + 12);
             long expectedSectors = Math.min(diskSectors - 1, 0xffff_ffffL);
-            if (firstLba != 1 || sectors != expectedSectors) {
+            boolean validSectors = sectors == expectedSectors
+                    || diskSectors - 1 <= 0xffff_ffffL && sectors == 0xffff_ffffL;
+            if (firstLba != 1 || !validSectors) {
                 return false;
             }
         }
@@ -327,7 +329,9 @@ public final class GptParser {
         long startLba = u32(mbr, entryOffset + 8);
         long sectors = u32(mbr, entryOffset + 12);
         long expectedSectors = Math.min(diskSectors - 1, 0xffff_ffffL);
-        if (startLba != 1 || sectors != expectedSectors) {
+        boolean validSectors = sectors == expectedSectors
+                || diskSectors - 1 <= 0xffff_ffffL && sectors == 0xffff_ffffL;
+        if (startLba != 1 || !validSectors) {
             long lastLba = sectors == 0 ? startLba : startLba + sectors - 1;
             long expectedLastLba = expectedSectors;
             return "Защитная запись MBR 0xEE присутствует, но задаёт диапазон LBA ["

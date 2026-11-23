@@ -150,12 +150,12 @@ class GptParserTest {
                 .anyMatch(text -> text.contains("пределы анализатора")));
 
         byte[] oversizedProtectiveEntry = validGpt(128);
-        put32(oversizedProtectiveEntry, 446 + 12, -1);
+        put32(oversizedProtectiveEntry, 446 + 8, 2);
         GptParseResult oversizedProtectiveResult = parser.parse(reader(oversizedProtectiveEntry));
         assertFalse(oversizedProtectiveResult.protectiveMbrValid());
         assertTrue(oversizedProtectiveResult.diagnostics().stream().anyMatch(text ->
                 text.contains("Защитная запись MBR 0xEE присутствует")
-                        && text.contains("задаёт диапазон LBA [1, 4294967295]")
+                        && text.contains("задаёт диапазон LBA [2, 256]")
                         && text.contains("ожидается [1, 255]")));
         assertEquals(io.github.delokoseni.service.diagnostics.DiagnosticSeverity.WARNING,
                 new io.github.delokoseni.service.diagnostics.DiagnosticService()
@@ -164,6 +164,33 @@ class GptParserTest {
                         .findFirst().orElseThrow().severity());
         assertEquals(1, oversizedProtectiveResult.partitions().size(),
                 "A malformed protective MBR range does not invalidate CRC-verified GPT data");
+    }
+
+    @Test
+    void acceptsSaturatedProtectiveSizeOnlyWhenDiskSizeIsRepresentable() throws Exception {
+        byte[] normal = validGpt(128);
+        assertTrue(parser.parse(reader(normal)).protectiveMbrValid());
+
+        byte[] saturated = validGpt(128);
+        put32(saturated, 446 + 12, -1);
+        GptParseResult saturatedResult = parser.parse(reader(saturated));
+        assertTrue(saturatedResult.protectiveMbrValid(),
+                "A saturated size is valid for a synthetic disk smaller than 2^32 sectors");
+
+        byte[] adataSize = validGpt(128);
+        put32(adataSize, 446 + 12, -1);
+        GptParseResult adataResult = parser.parse(new SyntheticDiskReader(
+                adataSize, SECTOR, 500_118_192L * SECTOR));
+        assertTrue(adataResult.protectiveMbrValid(),
+                "A saturated size is valid for a disk with exactly 500118192 sectors");
+
+        byte[] wrongCount = validGpt(128);
+        put32(wrongCount, 446 + 12, 254);
+        GptParseResult wrongResult = parser.parse(reader(wrongCount));
+        assertFalse(wrongResult.protectiveMbrValid(),
+                "A non-saturated size differing from the disk's exact last-LBA count is invalid");
+        assertTrue(wrongResult.diagnostics().stream()
+                .anyMatch(text -> text.contains("ожидается [1, 255]")));
     }
 
     @Test

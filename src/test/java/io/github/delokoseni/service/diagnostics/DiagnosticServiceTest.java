@@ -43,14 +43,14 @@ class DiagnosticServiceTest {
     }
 
     @Test
-    void treatsBackupGptCrcAsWarningAndUnavailablePhysicalSectorAsUnavailable() {
+    void treatsBackupGptCrcAsWarningAndUnavailablePhysicalSectorAsInformation() {
         List<DiagnosticFinding> findings = service.classify("Физический диск 2", List.of(
                 "CRC32 массива разделов GPT (Резервная копия) недействительна",
                 "CRC32 заголовка GPT (Основная копия) недействительна",
                 "Размер физического сектора недоступен"));
 
         assertEquals(List.of(DiagnosticSeverity.WARNING, DiagnosticSeverity.WARNING,
-                        DiagnosticSeverity.UNAVAILABLE),
+                        DiagnosticSeverity.INFORMATION),
                 findings.stream().map(DiagnosticFinding::severity).toList());
     }
 

@@ -35,8 +35,10 @@ public final class DiagnosticService {
                 || lower.contains("(backup)") || lower.contains("(primary)"))) {
             return DiagnosticSeverity.WARNING;
         }
-        if (lower.contains("размер физического сектора недоступен")) {
-            return DiagnosticSeverity.UNAVAILABLE;
+        if (lower.contains("размер физического сектора недоступен")
+                || lower.contains("не удалось получить размер физического сектора")
+                || lower.contains("физического сектора не удалось получить")) {
+            return DiagnosticSeverity.INFORMATION;
         }
         if (lower.contains("анализ ntfs недоступен для файловой системы")
                 || lower.contains("анализ ntfs не подтверждён")

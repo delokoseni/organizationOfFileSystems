@@ -23,6 +23,7 @@ import io.github.delokoseni.util.UiMessages;
 import javafx.concurrent.Task;
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
+import javafx.geometry.Rectangle2D;
 import javafx.scene.Node;
 import javafx.scene.Parent;
 import javafx.scene.control.Alert;
@@ -45,6 +46,7 @@ import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
 import javafx.scene.layout.VBox;
 import javafx.beans.property.ReadOnlyStringWrapper;
+import javafx.stage.Screen;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -372,7 +374,13 @@ public final class MainController {
     }
 
     private void storeVolumeDiagnostics(VolumeInspection volume, List<DiagnosticFinding> findings) {
-        volumeDiagnostics.put(diagnosticKey(volume), List.copyOf(findings));
+        List<DiagnosticFinding> conciseFindings = findings.stream()
+                .map(finding -> finding.message().contains("Количество секторов NTFS отличается")
+                        ? new DiagnosticFinding(finding.severity(), finding.scope(),
+                        "Расхождение границы NTFS сохранено; подробный анализ доступен в основном выводе анализа.")
+                        : finding)
+                .toList();
+        volumeDiagnostics.put(diagnosticKey(volume), List.copyOf(conciseFindings));
         refreshDiagnosticTable();
     }
 
@@ -638,55 +646,99 @@ public final class MainController {
         startWorker(analysis, "selected-volume-analysis");
     }
 
+
     private void showAnalysisResult(VolumeAnalysis result) {
         Alert report = new Alert(Alert.AlertType.INFORMATION);
+
         report.setTitle("Анализ только для чтения");
-        report.setHeaderText("Проверен том на физическом диске " + result.candidate().physicalDiskNumber());
+        report.setHeaderText(
+                "Проверен том на физическом диске "
+                        + result.candidate().physicalDiskNumber()
+        );
+
         String text = describeCandidate(result.candidate());
-        String fileSystem = result.candidate().volumeInspection().volume().fileSystem();
+        String fileSystem = result.candidate()
+                .volumeInspection().volume().fileSystem();
+
         if (result.ntfsData().isEmpty()) {
             text += "\n\nДанные NTFS недоступны, поскольку файловая система выбранного тома — "
                     + (fileSystem.isBlank() ? "неизвестная" : fileSystem) + ".";
         }
+
         if (result.ntfsData().isPresent()) {
             NtfsVolumeData ntfs = result.ntfsData().orElseThrow();
             var metrics = result.ntfsMetrics().orElseThrow();
-            text += "\n\nСерийный номер тома NTFS: " + Long.toUnsignedString(ntfs.volumeSerialNumber())
+
+            text += "\n\nСерийный номер тома NTFS: "
+                    + Long.toUnsignedString(ntfs.volumeSerialNumber())
                     + "\nКоличество секторов: " + ntfs.numberOfSectors()
                     + "\nВсего кластеров: " + ntfs.totalClusters()
                     + "\nСвободных кластеров: " + ntfs.freeClusters()
                     + "\nЗарезервировано кластеров: " + ntfs.reservedClusters()
-                    + "\nБайт в секторе / кластере: " + ntfs.bytesPerSector() + " / " + ntfs.bytesPerCluster()
+                    + "\nБайт в секторе / кластере: "
+                    + ntfs.bytesPerSector() + " / " + ntfs.bytesPerCluster()
                     + "\nСекторов в кластере: " + metrics.sectorsPerCluster()
-                    + "\nЁмкость кластеров: " + CapacityFormatter.format(metrics.totalClusterCapacityBytes())
-                    + "\nИспользовано кластеров (включая резерв): " + metrics.usedClusters()
-                    + "\nЁмкость свободных кластеров: " + CapacityFormatter.format(metrics.freeClusterCapacityBytes())
-                    + "\nНачало MFT (LCN / смещение в томе): " + ntfs.mftStartLcn() + " / "
+                    + "\nЁмкость кластеров: "
+                    + CapacityFormatter.format(metrics.totalClusterCapacityBytes())
+                    + "\nИспользовано кластеров (включая резерв): "
+                    + metrics.usedClusters()
+                    + "\nЁмкость свободных кластеров: "
+                    + CapacityFormatter.format(metrics.freeClusterCapacityBytes())
+                    + "\nНачало MFT (LCN / смещение в томе): "
+                    + ntfs.mftStartLcn() + " / "
                     + metrics.mftStartOffsetWithinVolume() + " байт"
-                    + "\nЗеркало MFT (LCN / смещение в томе): " + ntfs.mftMirrorStartLcn() + " / "
+                    + "\nЗеркало MFT (LCN / смещение в томе): "
+                    + ntfs.mftMirrorStartLcn() + " / "
                     + metrics.mftMirrorStartOffsetWithinVolume() + " байт"
-                    + "\nДлина действительных данных MFT: " + ntfs.mftValidDataLength()
-                    + "\nРазмер записи MFT: " + metrics.mftRecordSizeBytes()
+                    + "\nДлина действительных данных MFT: "
+                    + ntfs.mftValidDataLength()
+                    + "\nРазмер записи MFT: "
+                    + metrics.mftRecordSizeBytes()
                     + " байт (" + NtfsFileRecordSegmentSize.describeClustersPerRecord(
                     metrics.mftRecordSizeBytes(), ntfs.bytesPerCluster()) + ")"
-                    + "; Windows ClustersPerFileRecordSegment: " + ntfs.clustersPerFileRecordSegment()
+                    + "; Windows ClustersPerFileRecordSegment: "
+                    + ntfs.clustersPerFileRecordSegment()
                     + (ntfs.clustersPerFileRecordSegment() == 0
                     && metrics.mftRecordSizeBytes() < ntfs.bytesPerCluster()
                     ? " (запись меньше кластера; значение DWORD равно нулю)" : "")
                     + (result.ntfsBootSector().isPresent()
                     ? "; знаковое кодирование размера записи в BPB: "
                     + result.ntfsBootSector().orElseThrow().fileRecordSizeEncoding() : "")
-                    + "\nДиапазон зоны MFT по LCN: [" + ntfs.mftZoneStartLcn() + ", "
-                    + ntfs.mftZoneEndLcn() + "), размер: " + CapacityFormatter.format(metrics.mftZoneSizeBytes())
+                    + "\nДиапазон зоны MFT по LCN: ["
+                    + ntfs.mftZoneStartLcn() + ", "
+                    + ntfs.mftZoneEndLcn() + "), размер: "
+                    + CapacityFormatter.format(metrics.mftZoneSizeBytes())
                     + "\nВерсия NTFS: FSCTL_GET_NTFS_VOLUME_DATA её не предоставляет";
         }
+
         if (!result.diagnostics().isEmpty()) {
-            text += "\n\nДиагностика:\n" + String.join("\n", result.diagnostics());
+            text += "\n\nДиагностика:\n"
+                    + String.join("\n", result.diagnostics());
         }
+
         ntfsInformation.setText(text);
-        report.setContentText(text);
+
+        // Создаём прокручиваемое поле с результатами
+        TextArea textArea = new TextArea(text);
+        textArea.setEditable(false);
+        textArea.setWrapText(true);
+
+        // Определяем доступную область экрана
+        Rectangle2D bounds = Screen.getPrimary().getVisualBounds();
+
+        double width = Math.min(900, bounds.getWidth() * 0.85);
+        double height = Math.min(700, bounds.getHeight() * 0.85);
+
+        textArea.setPrefWidth(width - 40);
+        textArea.setPrefHeight(height - 140);
+
+        report.getDialogPane().setContent(textArea);
+        report.getDialogPane().setPrefWidth(width);
+        report.getDialogPane().setPrefHeight(height);
+
         report.showAndWait();
     }
+
 
     private static String describeCandidate(VolumeAnalysisCandidate candidate) {
         VolumeInspection inspection = candidate.volumeInspection();
