@@ -17,7 +17,7 @@ public record DiskInfo(
     public DiskInfo {
         if (diskNumber < 0 || capacityBytes < 0
                 || logicalSectorSize < 0 || physicalSectorSize < 0) {
-            throw new IllegalArgumentException("Disk numbers, sizes, and capacities cannot be negative");
+            throw new IllegalArgumentException("Номер диска, размеры и ёмкости не могут быть отрицательными.");
         }
         devicePath = Objects.requireNonNullElse(devicePath, "");
         model = Objects.requireNonNullElse(model, "");

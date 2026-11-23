@@ -20,7 +20,7 @@ public record NtfsVolumeData(
         if (numberOfSectors < 0 || totalClusters < 0 || freeClusters < 0 || reservedClusters < 0
                 || bytesPerSector < 0 || bytesPerCluster < 0 || bytesPerFileRecordSegment < 0
                 || mftValidDataLength < 0) {
-            throw new IllegalArgumentException("NTFS counts and sizes cannot be negative");
+            throw new IllegalArgumentException("Счётчики и размеры NTFS не могут быть отрицательными.");
         }
     }
 }

@@ -44,7 +44,7 @@ class NtfsVolumeDataQueryTest {
                 }));
 
         assertEquals(2, sequence.get());
-        assertTrue(error.getMessage().contains("Win32 error 50 ERROR_NOT_SUPPORTED"));
+        assertTrue(error.getMessage().contains("ошибка Win32 50 ERROR_NOT_SUPPORTED"));
     }
 
     private static void writeValidStructure(byte[] bytes) {

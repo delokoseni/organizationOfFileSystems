@@ -17,11 +17,11 @@ public enum RawDiskAccessStatus {
 
     public String displayName() {
         return switch (this) {
-            case DISCOVERED -> "Discovered; raw read not attempted";
-            case READ_ACCESS_AVAILABLE -> "Read access available";
-            case ACCESS_DENIED -> "Access denied";
-            case DEVICE_DISCONNECTED -> "Device disconnected";
-            case INFORMATION_UNAVAILABLE -> "Information unavailable";
+            case DISCOVERED -> "Обнаружен; чтение не выполнялось";
+            case READ_ACCESS_AVAILABLE -> "Доступно чтение";
+            case ACCESS_DENIED -> "Доступ запрещён";
+            case DEVICE_DISCONNECTED -> "Устройство отключено";
+            case INFORMATION_UNAVAILABLE -> "Сведения недоступны";
         };
     }
 }

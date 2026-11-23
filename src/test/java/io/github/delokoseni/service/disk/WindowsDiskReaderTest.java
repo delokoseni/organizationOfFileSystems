@@ -52,8 +52,8 @@ class WindowsDiskReaderTest {
                     DiskNativeException.class, reader::readStorageDeviceIdentity);
             assertEquals(87, error.win32Error());
             assertEquals("ERROR_INVALID_PARAMETER", error.win32ErrorName());
-            assertTrue(error.getMessage().contains("property 0"));
-            assertTrue(error.getMessage().contains("Win32 error 87 ERROR_INVALID_PARAMETER"));
+            assertTrue(error.getMessage().contains("свойство 0"));
+            assertTrue(error.getMessage().contains("ошибка Win32 87 ERROR_INVALID_PARAMETER"));
             assertArrayEquals(new byte[]{7, 8, 9}, reader.read(7, 3));
             assertEquals(4096, reader.readPhysicalSectorSize());
         }
@@ -65,7 +65,7 @@ class WindowsDiskReaderTest {
         api.malformedDeviceDescriptor = true;
         try (WindowsDiskReader reader = WindowsDiskReader.open(1, api)) {
             assertTrue(assertThrows(IOException.class, reader::readStorageDeviceIdentity)
-                    .getMessage().contains("incomplete storage device descriptor"));
+                    .getMessage().contains("неполный дескриптор устройства хранения"));
             assertArrayEquals(new byte[]{7, 8, 9}, reader.read(7, 3));
         }
     }

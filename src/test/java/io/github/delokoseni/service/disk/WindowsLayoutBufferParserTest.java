@@ -31,6 +31,35 @@ class WindowsLayoutBufferParserTest {
     }
 
     @Test
+    void ignoresUnusedMbrPartitionSlotsReturnedByWindows() throws Exception {
+        byte[] bytes = new byte[HEADER_SIZE + ENTRY_SIZE * 4];
+        put32(bytes, 0, 0);
+        put32(bytes, 4, 4);
+        put32(bytes, HEADER_SIZE + 24, 1);
+        put64(bytes, HEADER_SIZE + 8, 1_048_576);
+        put64(bytes, HEADER_SIZE + 16, 61_990_764_544L);
+        bytes[HEADER_SIZE + 32] = 0x07;
+
+        WindowsPartitionLayout parsed = new WindowsLayoutBufferParser().parse(bytes, bytes.length);
+
+        assertEquals(1, parsed.partitions().size());
+        assertEquals(1, parsed.partitions().getFirst().partitionNumber());
+        assertEquals(61_990_764_544L, parsed.partitions().getFirst().lengthBytes());
+    }
+
+    @Test
+    void preservesEntriesWithZeroGeometryButOtherPartitionMetadata() throws Exception {
+        byte[] bytes = new byte[HEADER_SIZE + ENTRY_SIZE];
+        put32(bytes, 0, 0);
+        put32(bytes, 4, 1);
+        bytes[HEADER_SIZE + 28] = 1;
+
+        WindowsPartitionLayout parsed = new WindowsLayoutBufferParser().parse(bytes, bytes.length);
+
+        assertEquals(1, parsed.partitions().size());
+    }
+
+    @Test
     void rejectsTruncatedAndExcessiveLayoutBuffers() {
         byte[] truncated = new byte[HEADER_SIZE + ENTRY_SIZE];
         put32(truncated, 4, 2);

@@ -14,7 +14,7 @@ public final class WindowsLayoutBufferParser {
 
     public WindowsPartitionLayout parse(byte[] bytes, int bytesReturned) throws IOException {
         if (bytes == null || bytesReturned < 8 || bytesReturned > bytes.length) {
-            throw new IOException("Windows returned a truncated drive layout");
+            throw new IOException("Windows вернула усечённую структуру разметки диска.");
         }
         int styleCode = i32(bytes, 0);
         PartitionStyle style = switch (styleCode) {
@@ -25,11 +25,11 @@ public final class WindowsLayoutBufferParser {
         };
         long count = u32(bytes, 4);
         if (count > MAX_PARTITIONS) {
-            throw new IOException("Windows drive layout partition count exceeds parser limits");
+            throw new IOException("Число разделов в разметке Windows превышает пределы анализатора.");
         }
         long required = PARTITION_ARRAY_OFFSET + count * PARTITION_INFO_SIZE;
         if (required > bytesReturned) {
-            throw new IOException("Windows returned an incomplete drive layout");
+            throw new IOException("Windows вернула неполную структуру разметки диска.");
         }
 
         List<WindowsPartitionInfo> partitions = new ArrayList<>((int) count);
@@ -39,11 +39,15 @@ public final class WindowsLayoutBufferParser {
             long length = i64(bytes, offset + 16);
             long partitionNumber = u32(bytes, offset + 24);
             if (startingOffset < 0 || length < 0 || partitionNumber > Integer.MAX_VALUE) {
-                throw new IOException("Windows returned unsupported partition offsets or numbers");
+                throw new IOException("Windows вернула неподдерживаемые смещения или номера разделов.");
             }
             int mbrType = style == PartitionStyle.MBR ? u8(bytes, offset + 32) : 0;
             String typeGuid = style == PartitionStyle.GPT ? guid(bytes, offset + 32) : "";
             String uniqueGuid = style == PartitionStyle.GPT ? guid(bytes, offset + 48) : "";
+            if (startingOffset == 0 && length == 0 && partitionNumber == 0
+                    && isUnusedPartitionEntry(bytes, offset)) {
+                continue;
+            }
             partitions.add(new WindowsPartitionInfo((int) partitionNumber, startingOffset,
                     length, mbrType, typeGuid, uniqueGuid));
         }
@@ -81,5 +85,14 @@ public final class WindowsLayoutBufferParser {
             result.append(String.format(Locale.ROOT, "%02x", u8(bytes, offset + i)));
         }
         return result.toString();
+    }
+
+    private static boolean isUnusedPartitionEntry(byte[] bytes, int offset) {
+        for (int i = 28; i < PARTITION_INFO_SIZE; i++) {
+            if (bytes[offset + i] != 0) {
+                return false;
+            }
+        }
+        return true;
     }
 }

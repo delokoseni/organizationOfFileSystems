@@ -38,7 +38,7 @@ public final class WindowsDiskEnumerator implements DiskEnumerator {
     @Override
     public DiskEnumerationResult enumerate() throws IOException {
         if (!System.getProperty("os.name", "").toLowerCase(Locale.ROOT).startsWith("windows")) {
-            throw new IOException("Physical disk enumeration is available only on Windows");
+            throw new IOException("Обнаружение физических дисков доступно только в Windows.");
         }
         SetupApi api = SetupApiHolder.INSTANCE;
         Memory interfaceGuid = guidMemory();
@@ -46,7 +46,7 @@ public final class WindowsDiskEnumerator implements DiskEnumerator {
                 DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
         if (deviceInfoSet == null || Pointer.nativeValue(deviceInfoSet) == -1L
                 || Pointer.nativeValue(deviceInfoSet) == 0xffff_ffffL) {
-            throw setupError("SetupDiGetClassDevsW failed");
+            throw setupError("Сбой SetupDiGetClassDevsW");
         }
 
         List<DiscoveredPhysicalDisk> disks = new ArrayList<>();
@@ -62,8 +62,9 @@ public final class WindowsDiskEnumerator implements DiskEnumerator {
                     if (error == ERROR_NO_MORE_ITEMS) {
                         break;
                     }
-                    diagnostics.add("SetupDiEnumDeviceInterfaces failed at index " + index
-                            + " (Win32 error " + error + "); continuing with the next interface.");
+                    diagnostics.add("Сбой SetupDiEnumDeviceInterfaces на позиции " + index
+                            + " (ошибка Win32 " + error + " " + Win32ErrorNames.name(error)
+                            + "); переход к следующему интерфейсу.");
                     continue;
                 }
 
@@ -77,8 +78,9 @@ public final class WindowsDiskEnumerator implements DiskEnumerator {
                 if (detailError != ERROR_INSUFFICIENT_BUFFER
                         || requiredBytes.getValue() < 6
                         || requiredBytes.getValue() > MAX_PROPERTY_BYTES) {
-                    diagnostics.add("Could not size disk device-interface detail at index " + index
-                            + " (Win32 error " + detailError + "); that interface was skipped.");
+                    diagnostics.add("Не удалось определить размер сведений интерфейса диска на позиции " + index
+                            + " (ошибка Win32 " + detailError + " " + Win32ErrorNames.name(detailError)
+                            + "); интерфейс пропущен.");
                     continue;
                 }
 
@@ -89,9 +91,10 @@ public final class WindowsDiskEnumerator implements DiskEnumerator {
                 deviceInfoData.setInt(0, deviceInfoDataSize());
                 if (!api.SetupDiGetDeviceInterfaceDetailW(deviceInfoSet, interfaceData,
                         detail, requiredBytes.getValue(), requiredBytes, deviceInfoData)) {
-                    diagnostics.add("Could not read disk device-interface detail at index " + index
-                            + " (Win32 error " + Kernel32Holder.INSTANCE.GetLastError()
-                            + "); that interface was skipped.");
+                    int error = Kernel32Holder.INSTANCE.GetLastError();
+                    diagnostics.add("Не удалось прочитать сведения интерфейса диска на позиции " + index
+                            + " (ошибка Win32 " + error + " " + Win32ErrorNames.name(error)
+                            + "); интерфейс пропущен.");
                     continue;
                 }
                 String devicePath = detail.getWideString(4);
@@ -102,9 +105,8 @@ public final class WindowsDiskEnumerator implements DiskEnumerator {
                     diskNumber = readDiskNumber(devicePath, index, diagnostics);
                 }
                 if (diskNumber < 0) {
-                    diagnostics.add("Disk interface at index " + index
-                            + " had no recognizable physical disk number in its PnP object name "
-                            + "or storage device-number response.");
+                    diagnostics.add("В имени PnP или ответе о номере устройства интерфейса " + index
+                            + " не найден распознаваемый номер физического диска.");
                     continue;
                 }
                 String model = readProperty(api, deviceInfoSet, deviceInfoData, SPDRP_FRIENDLYNAME);
@@ -112,18 +114,19 @@ public final class WindowsDiskEnumerator implements DiskEnumerator {
                     model = readProperty(api, deviceInfoSet, deviceInfoData, SPDRP_DEVICEDESC);
                 }
                 if (model.isBlank()) {
-                    diagnostics.add("Model information was unavailable for physical disk " + diskNumber + ".");
+                    diagnostics.add("Модель физического диска " + diskNumber + " недоступна.");
                 }
                 disks.add(new DiscoveredPhysicalDisk(diskNumber,
                         "\\\\.\\PhysicalDrive" + diskNumber, model));
             }
             if (index == MAX_DISK_INTERFACES) {
-                diagnostics.add("Physical disk interface enumeration reached the configured safety limit.");
+                diagnostics.add("Обнаружение интерфейсов физических дисков достигло установленного предела безопасности.");
             }
         } finally {
             if (!api.SetupDiDestroyDeviceInfoList(deviceInfoSet)) {
-                diagnostics.add("SetupDiDestroyDeviceInfoList failed (Win32 error "
-                        + Kernel32Holder.INSTANCE.GetLastError() + ")");
+                int error = Kernel32Holder.INSTANCE.GetLastError();
+                diagnostics.add("Сбой SetupDiDestroyDeviceInfoList (ошибка Win32 "
+                        + error + " " + Win32ErrorNames.name(error) + ")");
             }
         }
         List<DiscoveredPhysicalDisk> uniqueDisks = disks.stream()
@@ -166,15 +169,17 @@ public final class WindowsDiskEnumerator implements DiskEnumerator {
 
     private static int readDiskNumber(String devicePath, int interfaceIndex, List<String> diagnostics) {
         if (devicePath == null || devicePath.isBlank()) {
-            diagnostics.add("Disk interface at index " + interfaceIndex + " returned an empty device path.");
+            diagnostics.add("Интерфейс диска на позиции " + interfaceIndex + " вернул пустой путь устройства.");
             return -1;
         }
         Kernel32 api = Kernel32Holder.INSTANCE;
         int shareMode = FILE_SHARE_READ | FILE_SHARE_WRITE;
         Pointer handle = api.CreateFileW(devicePath, 0, shareMode, null, OPEN_EXISTING, 0, null);
         if (isInvalidHandle(handle)) {
-            diagnostics.add("Could not query the disk number for interface " + interfaceIndex
-                    + " with zero desired access (Win32 error " + api.GetLastError() + ").");
+            int error = api.GetLastError();
+            diagnostics.add("Не удалось запросить номер диска для интерфейса " + interfaceIndex
+                    + " с desiredAccess=0 (ошибка Win32 " + error + " "
+                    + Win32ErrorNames.name(error) + ").");
             return -1;
         }
         try {
@@ -182,27 +187,30 @@ public final class WindowsDiskEnumerator implements DiskEnumerator {
             IntByReference bytesReturned = new IntByReference();
             if (!api.DeviceIoControl(handle, IOCTL_STORAGE_GET_DEVICE_NUMBER, null, 0,
                     response, response.length, bytesReturned, null)) {
-                diagnostics.add("IOCTL_STORAGE_GET_DEVICE_NUMBER failed for interface " + interfaceIndex
-                        + " (Win32 error " + api.GetLastError() + ").");
+                int error = api.GetLastError();
+                diagnostics.add("Сбой IOCTL_STORAGE_GET_DEVICE_NUMBER для интерфейса " + interfaceIndex
+                        + " (ошибка Win32 " + error + " " + Win32ErrorNames.name(error) + ").");
                 return -1;
             }
             if (bytesReturned.getValue() < STORAGE_DEVICE_NUMBER_SIZE) {
-                diagnostics.add("IOCTL_STORAGE_GET_DEVICE_NUMBER returned an incomplete response for "
-                        + "interface " + interfaceIndex + ".");
+                diagnostics.add("IOCTL_STORAGE_GET_DEVICE_NUMBER вернул неполный ответ для интерфейса "
+                        + interfaceIndex + ".");
                 return -1;
             }
             int deviceType = readInt32LE(response, 0);
             int diskNumber = readInt32LE(response, 4);
             if (deviceType != FILE_DEVICE_DISK || diskNumber < 0) {
-                diagnostics.add("IOCTL_STORAGE_GET_DEVICE_NUMBER returned an invalid disk identity for "
-                        + "interface " + interfaceIndex + ".");
+                diagnostics.add("IOCTL_STORAGE_GET_DEVICE_NUMBER вернул недопустимый идентификатор диска "
+                        + "для интерфейса " + interfaceIndex + ".");
                 return -1;
             }
             return diskNumber;
         } finally {
             if (!api.CloseHandle(handle)) {
-                diagnostics.add("Could not close the zero-access handle for disk interface "
-                        + interfaceIndex + " (Win32 error " + api.GetLastError() + ").");
+                int error = api.GetLastError();
+                diagnostics.add("Не удалось закрыть дескриптор интерфейса диска с нулевым доступом "
+                        + interfaceIndex + " (ошибка Win32 " + error + " "
+                        + Win32ErrorNames.name(error) + ").");
             }
         }
     }
@@ -245,8 +253,9 @@ public final class WindowsDiskEnumerator implements DiskEnumerator {
     }
 
     private static IOException setupError(String message) {
-        return new IOException(message + " (Win32 error "
-                + Kernel32Holder.INSTANCE.GetLastError() + ")");
+        int error = Kernel32Holder.INSTANCE.GetLastError();
+        return new IOException(message + " (ошибка Win32 "
+                + error + " " + Win32ErrorNames.name(error) + ")");
     }
 
     private interface SetupApi extends StdCallLibrary {

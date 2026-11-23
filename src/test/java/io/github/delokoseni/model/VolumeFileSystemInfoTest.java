@@ -14,8 +14,8 @@ class VolumeFileSystemInfoTest {
                 | FileSystemCapabilities.NAMED_STREAMS, 10_000, 2_000, 1_000, 8, 512);
 
         assertEquals(4096, info.clusterSizeBytes());
-        assertTrue(info.capabilityNames().contains("Case-preserved names"));
-        assertTrue(info.capabilityNames().contains("Named streams"));
+        assertTrue(info.capabilityNames().contains("Имена с сохранением регистра"));
+        assertTrue(info.capabilityNames().contains("Именованные потоки"));
     }
 
     @Test

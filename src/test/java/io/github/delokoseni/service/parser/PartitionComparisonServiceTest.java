@@ -20,9 +20,19 @@ class PartitionComparisonServiceTest {
         List<String> differences = new PartitionComparisonService().compare(
                 PartitionStyle.GPT, List.of(parsed), windows);
 
-        assertTrue(differences.stream().anyMatch(text -> text.contains("style differs")));
-        assertTrue(differences.stream().anyMatch(text -> text.contains("partition number")));
-        assertTrue(differences.stream().anyMatch(text -> text.contains("starting offset differs")));
-        assertTrue(differences.stream().anyMatch(text -> text.contains("length differs")));
+        assertTrue(differences.stream().anyMatch(text -> text.contains("Тип таблицы разделов отличается")));
+        assertTrue(differences.stream().anyMatch(text -> text.contains("Номер раздела Windows")));
+        assertTrue(differences.stream().anyMatch(text -> text.contains("Начальное смещение раздела")));
+        assertTrue(differences.stream().anyMatch(text -> text.contains("Длина раздела")));
+    }
+
+    @Test
+    void doesNotCompareUnverifiedHybridPartitionEntriesAsAnAuthoritativeTable() {
+        List<String> differences = new PartitionComparisonService().compare(
+                PartitionStyle.HYBRID, List.of(),
+                new WindowsPartitionLayout(PartitionStyle.MBR, List.of()));
+
+        assertTrue(differences.getFirst().contains("пропущено"));
+        assertTrue(differences.getFirst().contains("HYBRID"));
     }
 }

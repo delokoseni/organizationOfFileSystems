@@ -18,11 +18,17 @@ import io.github.delokoseni.service.disk.RawDiskAccessStatus;
 import io.github.delokoseni.service.disk.WindowsDiskReader;
 import io.github.delokoseni.service.disk.WindowsPrivilegeService;
 import io.github.delokoseni.service.disk.WindowsPartitionInfo;
+import io.github.delokoseni.service.disk.Win32ErrorNames;
 import io.github.delokoseni.service.ntfs.FilesystemConsistencyService;
 import io.github.delokoseni.service.ntfs.NtfsCalculationService;
+import io.github.delokoseni.service.ntfs.NtfsBackupBootSectorEvidence;
+import io.github.delokoseni.service.ntfs.NtfsBootSectorInfo;
+import io.github.delokoseni.service.ntfs.NtfsBootSectorParser;
+import io.github.delokoseni.service.ntfs.NtfsFileRecordSegmentSize;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -47,14 +53,14 @@ public final class WindowsVolumeService {
 
     public List<VolumeInspection> enumerate() throws IOException {
         if (!System.getProperty("os.name", "").toLowerCase(Locale.ROOT).startsWith("windows")) {
-            throw new IOException("Volume inspection is available only on Windows");
+            throw new IOException("Проверка томов доступна только в Windows.");
         }
         Kernel32 api = Kernel32Holder.INSTANCE;
         List<VolumeInspection> volumes = new ArrayList<>();
         char[] pathBuffer = new char[MAX_VOLUME_PATH_CHARS];
         Pointer search = api.FindFirstVolumeW(pathBuffer, pathBuffer.length);
         if (isInvalidHandle(search)) {
-            throw win32Error(api, "Could not enumerate Windows volumes");
+            throw win32Error(api, "Не удалось перечислить тома Windows");
         }
         try {
             do {
@@ -71,42 +77,45 @@ public final class WindowsVolumeService {
                 VolumeInfo partial = new VolumeInfo("<volume enumeration incomplete>",
                         List.of(), "", "", 0, 0, 0);
                 volumes.add(new VolumeInspection(partial, Optional.empty(), List.of(), Optional.empty(),
-                        List.of("FindNextVolumeW stopped unexpectedly (Win32 error " + error + ")")));
+                        List.of("FindNextVolumeW завершился неожиданно (ошибка Win32 " + error + " "
+                                + Win32ErrorNames.name(error) + ").")));
             }
         } finally {
             if (!api.FindVolumeClose(search)) {
                 VolumeInfo partial = new VolumeInfo("<volume enumeration cleanup warning>",
                         List.of(), "", "", 0, 0, 0);
                 volumes.add(new VolumeInspection(partial, Optional.empty(), List.of(), Optional.empty(),
-                        List.of("FindVolumeClose failed (Win32 error " + api.GetLastError() + ")")));
+                        List.of(closeVolumeError(api))));
             }
         }
         return List.copyOf(volumes);
     }
 
-    public ExternalVolumeCandidate verifyExternalAdataD() throws IOException {
-        return verifyExternalAdataD(enumerate());
-    }
-
-    public ExternalVolumeCandidate verifyExternalAdataD(List<VolumeInspection> volumes) throws IOException {
-        ExternalVolumeSelection selection;
+    public VolumeAnalysisCandidate verifySelectedVolume(VolumeInspection requested) throws IOException {
+        if (requested == null || requested.volume().volumeGuidPath().isBlank()) {
+            throw new IOException("Выбранный том не имеет допустимого идентификатора.");
+        }
+        String selectedPath = requested.volume().volumeGuidPath();
+        VolumeInspection volume;
         try {
-            selection = new ExternalVolumeSelectionService().selectDVolume(volumes);
+            volume = new VolumeSelectionService().resolveCurrentSelection(enumerate(), selectedPath);
         } catch (IllegalArgumentException e) {
             throw new IOException(e.getMessage(), e);
         }
-        VolumeInspection volume = selection.volume();
-        int diskNumber = selection.physicalDiskNumber();
+        int diskNumber = volume.diskExtents().getFirst().diskNumber();
         try (WindowsDiskReader reader = WindowsDiskReader.open(diskNumber)) {
-            StorageDeviceIdentity identity = reader.readStorageDeviceIdentity();
-            String model = identity.modelName();
-            if (!"ADATA SE760".equalsIgnoreCase(model)) {
-                throw new IOException("D: maps to physical disk " + diskNumber + " with model '"
-                        + (model.isBlank() ? "unavailable" : model)
-                        + "', not exactly ADATA SE760. Analysis is disabled.");
+            List<String> verificationDiagnostics = new ArrayList<>();
+            String model = "";
+            String serialNumber = "";
+            try {
+                StorageDeviceIdentity identity = reader.readStorageDeviceIdentity();
+                model = identity.modelName();
+                serialNumber = identity.serialNumber();
+            } catch (IOException e) {
+                verificationDiagnostics.add("Модель и идентификатор диска недоступны: " + e.getMessage());
             }
             if (reader.getDiskSize() <= 0) {
-                throw new IOException("Mapped physical disk capacity is unavailable.");
+                throw new IOException("Ёмкость сопоставленного физического диска недоступна.");
             }
             OptionalInt physicalSectorSize;
             try {
@@ -115,23 +124,37 @@ public final class WindowsVolumeService {
                 physicalSectorSize = OptionalInt.empty();
             }
 
-            var layout = reader.readWindowsPartitionLayout();
-            Map<Integer, List<WindowsPartitionInfo>> partitionsByDisk = Map.of(diskNumber, layout.partitions());
-            List<VolumePartitionMappingService.ExtentPartitionMapping> mappings =
-                    new VolumePartitionMappingService().map(volume.diskExtents(), partitionsByDisk);
-            if (mappings.size() != volume.diskExtents().size()
-                    || mappings.stream().anyMatch(mapping -> !mapping.isUnambiguous())) {
-                throw new IOException("D: extents do not map unambiguously to Windows partitions; "
-                        + "analysis is disabled.");
+            List<WindowsPartitionInfo> windowsPartitions = List.of();
+            try {
+                windowsPartitions = reader.readWindowsPartitionLayout().partitions();
+            } catch (IOException e) {
+                verificationDiagnostics.add("Разметка разделов Windows недоступна; NTFS-запрос по GUID тома "
+                        + "может выполняться независимо: " + e.getMessage());
             }
-            Map<Integer, WindowsPartitionInfo> uniquePartitions = new LinkedHashMap<>();
-            for (var mapping : mappings) {
-                WindowsPartitionInfo partition = mapping.candidatePartitions().getFirst();
-                uniquePartitions.put(partition.partitionNumber(), partition);
+            List<WindowsPartitionInfo> verifiedPartitions = List.of();
+            if (!windowsPartitions.isEmpty()) {
+                Map<Integer, List<WindowsPartitionInfo>> partitionsByDisk = Map.of(diskNumber, windowsPartitions);
+                List<VolumePartitionMappingService.ExtentPartitionMapping> mappings =
+                        new VolumePartitionMappingService().map(volume.diskExtents(), partitionsByDisk);
+                if (mappings.size() == volume.diskExtents().size()
+                        && mappings.stream().allMatch(VolumePartitionMappingService.ExtentPartitionMapping::isUnambiguous)) {
+                    Map<Integer, WindowsPartitionInfo> uniquePartitions = new LinkedHashMap<>();
+                    for (var mapping : mappings) {
+                        WindowsPartitionInfo partition = mapping.candidatePartitions().getFirst();
+                        uniquePartitions.put(partition.partitionNumber(), partition);
+                    }
+                    verifiedPartitions = List.copyOf(uniquePartitions.values());
+                } else {
+                    verificationDiagnostics.add("Область тома не сопоставлена однозначно с разметкой Windows; "
+                            + "сведения о разделе не подтверждены. Запрос NTFS по GUID тома не зависит от GPT.");
+                }
+            } else {
+                verificationDiagnostics.add("Разметка Windows не содержит подтверждённых разделов; "
+                        + "сведения о разделе недоступны. Запрос NTFS по GUID тома не зависит от GPT.");
             }
-            return new ExternalVolumeCandidate(volume, diskNumber, model, identity.serialNumber(), reader.getDiskSize(),
+            return new VolumeAnalysisCandidate(volume, diskNumber, model, serialNumber, reader.getDiskSize(),
                     reader.getLogicalSectorSize(), physicalSectorSize,
-                    List.copyOf(uniquePartitions.values()));
+                    verifiedPartitions, verificationDiagnostics);
         } catch (DiskOpenException e) {
             String message = e.getMessage();
             if (RawDiskAccessStatus.fromWin32Error(e.win32Error())
@@ -139,7 +162,7 @@ public final class WindowsVolumeService {
                 try {
                     message += " " + new WindowsPrivilegeService().accessDeniedGuidance();
                 } catch (IOException privilegeError) {
-                    message += " Administrator status could not be determined: "
+                    message += " Не удалось определить статус администратора: "
                             + privilegeError.getMessage();
                 }
             }
@@ -147,34 +170,34 @@ public final class WindowsVolumeService {
         }
     }
 
-    public ExternalVolumeAnalysis inspectVerifiedAdataD(
-            ExternalVolumeCandidate candidate, boolean userConfirmed) throws IOException {
+    public VolumeAnalysis inspectVerifiedVolume(
+            VolumeAnalysisCandidate candidate, boolean userConfirmed) throws IOException {
         if (candidate == null) {
-            throw new IllegalArgumentException("A verified ADATA volume candidate is required");
+            throw new IllegalArgumentException("Требуется проверенный выбранный том.");
         }
         if (!userConfirmed) {
-            throw new IOException("Analysis cancelled because explicit user confirmation was not supplied.");
+            throw new IOException("Анализ отменён: явное подтверждение пользователя не получено.");
         }
 
-        ExternalVolumeCandidate fresh = verifyExternalAdataD();
+        VolumeAnalysisCandidate fresh = verifySelectedVolume(candidate.volumeInspection());
         if (!sameCandidate(candidate, fresh)) {
-            throw new IOException("D: device identity, capacity, or partition mapping changed; "
-                    + "analysis is cancelled.");
+            throw new IOException("Идентификатор выбранного устройства, ёмкость или карта разделов изменились; "
+                    + "анализ отменён.");
         }
         String fileSystem = fresh.volumeInspection().volume().fileSystem();
         FileSystemType fileSystemType = FileSystemType.fromWindowsName(fileSystem);
+        List<String> diagnostics = new ArrayList<>(fresh.diagnostics());
         if (!NtfsAnalysisPolicy.shouldQuery(fileSystem, userConfirmed)) {
-            return new ExternalVolumeAnalysis(fresh, Optional.empty(), Optional.empty(),
-                    List.of("NTFS-specific analysis is unavailable for filesystem "
-                            + (fileSystemType == FileSystemType.UNKNOWN ? "unknown" : fileSystem) + "."));
+            return new VolumeAnalysis(fresh, Optional.empty(), Optional.empty(), Optional.empty(),
+                    append(diagnostics, "Анализ NTFS недоступен для файловой системы "
+                            + (fileSystemType == FileSystemType.UNKNOWN ? "неизвестного типа" : fileSystem) + "."));
         }
 
         Kernel32 api = Kernel32Holder.INSTANCE;
-        List<String> diagnostics = new ArrayList<>();
         Pointer handle = openVolume(api, fresh.volumeInspection().volume().volumeGuidPath(),
                 GENERIC_READ, diagnostics, "read-only NTFS volume-data query");
         if (handle == null) {
-            throw new IOException("Could not open verified ADATA volume read-only: "
+            throw new IOException("Не удалось открыть выбранный том для чтения: "
                     + String.join("; ", diagnostics));
         }
         try {
@@ -183,20 +206,158 @@ public final class WindowsVolumeService {
             try {
                 metrics = new NtfsCalculationService().calculate(data);
             } catch (IllegalArgumentException e) {
-                throw new IOException("NTFS parameters failed validation: " + e.getMessage(), e);
+                throw new IOException("Проверка параметров NTFS завершилась ошибкой: " + e.getMessage(), e);
+            }
+            NtfsBootSectorInfo bootSector = null;
+            NtfsBackupBootSectorEvidence backupEvidence = null;
+            long extentStartingLba = 0;
+            try {
+                    if (fresh.volumeInspection().diskExtents().size() == 1
+                            && fresh.partitions().size() == 1) {
+                        BootSectorCheck check = readNtfsBootSector(fresh);
+                        bootSector = check.info();
+                        backupEvidence = check.backupEvidence();
+                        extentStartingLba = check.extentStartingLba();
+                        NtfsFileRecordSegmentSize.validateWindowsClusterCount(
+                                bootSector.fileRecordSizeBytes(), data.bytesPerCluster(),
+                                data.clustersPerFileRecordSegment());
+                    } else {
+                        diagnostics.add("Проверка загрузочного сектора NTFS пропущена: том содержит "
+                                + "несколько дисковых областей или разделов.");
+                    }
+            } catch (IOException | IllegalArgumentException e) {
+                diagnostics.add("Не удалось проверить геометрию загрузочного сектора/записи NTFS: "
+                        + e.getMessage());
             }
             long extentBytes = sumExtentBytes(fresh.volumeInspection().diskExtents());
             long partitionBytes = sumPartitionBytes(fresh.partitions());
-            VolumeFileSystemInfo fileSystemInfo = fresh.volumeInspection().fileSystem().orElseThrow(
-                    () -> new IOException("Verified filesystem metadata is no longer available"));
-            diagnostics.addAll(new FilesystemConsistencyService().validate(
-                    partitionBytes, extentBytes, fileSystemInfo, data, metrics));
-            return new ExternalVolumeAnalysis(fresh, Optional.of(data), Optional.of(metrics), diagnostics);
+            if (fresh.volumeInspection().fileSystem().isPresent()) {
+                VolumeFileSystemInfo fileSystemInfo = fresh.volumeInspection().fileSystem().orElseThrow();
+                diagnostics.addAll(new FilesystemConsistencyService().validate(
+                        partitionBytes, extentBytes, fileSystemInfo, data, metrics,
+                        bootSector, backupEvidence,
+                        extentStartingLba));
+            } else {
+                diagnostics.add("Сверка с геометрией файловой системы Windows пропущена: эти сведения недоступны.");
+            }
+            return new VolumeAnalysis(fresh, Optional.of(data), Optional.of(metrics),
+                    Optional.ofNullable(bootSector), diagnostics);
         } finally {
             if (!api.CloseHandle(handle)) {
-                throw win32Error(api, "Could not close verified ADATA volume handle");
+                throw win32Error(api, "Не удалось закрыть дескриптор выбранного тома");
             }
         }
+    }
+
+    private static BootSectorCheck readNtfsBootSector(VolumeAnalysisCandidate candidate)
+            throws IOException {
+        List<DiskExtent> extents = candidate.volumeInspection().diskExtents();
+        if (extents.size() != 1) {
+            throw new IOException("Ожидалась одна непрерывная область тома Windows, получено: " + extents.size());
+        }
+        DiskExtent extent = extents.getFirst();
+        if (extent.diskNumber() != candidate.physicalDiskNumber()
+                || candidate.partitions().stream().noneMatch(partition ->
+                partition.startingOffsetBytes() == extent.startingOffsetBytes()
+                        && partition.lengthBytes() == extent.extentLengthBytes())) {
+            throw new IOException("Проверенная область NTFS больше не соответствует выбранному разделу.");
+        }
+        try (WindowsDiskReader reader = WindowsDiskReader.open(extent.diskNumber())) {
+            if (reader.getDiskSize() != candidate.diskCapacityBytes()) {
+                throw new IOException("Ёмкость физического диска изменилась при проверке загрузочного сектора NTFS.");
+            }
+            if (!candidate.model().isBlank() || !candidate.serialNumber().isBlank()) {
+                StorageDeviceIdentity identity;
+                try {
+                    identity = reader.readStorageDeviceIdentity();
+                } catch (IOException e) {
+                    throw new IOException("Не удалось повторно проверить идентификатор физического диска.", e);
+                }
+                if ((!candidate.model().isBlank() && !candidate.model().equalsIgnoreCase(identity.modelName()))
+                        || (!candidate.serialNumber().isBlank()
+                        && !candidate.serialNumber().equalsIgnoreCase(identity.serialNumber()))) {
+                    throw new IOException("Идентификатор физического диска изменился при проверке загрузочного сектора NTFS.");
+                }
+            }
+            int sectorSize = reader.getLogicalSectorSize();
+            if (extent.startingOffsetBytes() < 0 || extent.startingOffsetBytes() % sectorSize != 0
+                    || extent.extentLengthBytes() < sectorSize
+                    || extent.extentLengthBytes() % sectorSize != 0) {
+                throw new IOException("Область тома NTFS имеет недопустимые границы секторов.");
+            }
+            long lastSectorOffset;
+            try {
+                lastSectorOffset = Math.addExact(extent.startingOffsetBytes(),
+                        Math.subtractExact(extent.extentLengthBytes(), sectorSize));
+            } catch (ArithmeticException e) {
+                throw new IOException("Смещение загрузочного сектора NTFS выходит за допустимые границы.", e);
+            }
+            byte[] primary = reader.read(extent.startingOffsetBytes(), sectorSize);
+            NtfsBootSectorInfo info = new NtfsBootSectorParser().parse(primary);
+            if (info.bytesPerSector() != sectorSize) {
+                throw new IOException("NTFS BPB BytesPerSector=" + info.bytesPerSector()
+                        + " не совпадает с размером логического сектора диска " + sectorSize + ".");
+            }
+            long extentSectors = extent.extentLengthBytes() / sectorSize;
+            long extentStartingLba = extent.startingOffsetBytes() / sectorSize;
+            long extentLastLba = Math.addExact(extentStartingLba, extentSectors - 1);
+            byte[] terminalBackup = reader.read(lastSectorOffset, sectorSize);
+            long bpbExpectedBackupLba = -1;
+            boolean bpbBoundaryReadable = false;
+            boolean matchingBpbBoundaryCopy = false;
+            List<Long> matchingTrailingLbas = new ArrayList<>();
+            List<Long> zeroTrailingLbas = new ArrayList<>();
+            List<Long> otherTrailingLbas = new ArrayList<>();
+            List<Long> unreadableTrailingLbas = new ArrayList<>();
+            boolean trailingInspectionComplete = false;
+            bpbExpectedBackupLba = Math.addExact(extentStartingLba, info.totalSectors() - 1);
+            if (info.totalSectors() <= extentSectors) {
+                long bpbBackupOffset = Math.multiplyExact(bpbExpectedBackupLba, (long) sectorSize);
+                try {
+                    byte[] bpbBoundary = bpbBackupOffset == lastSectorOffset
+                            ? terminalBackup : reader.read(bpbBackupOffset, sectorSize);
+                    bpbBoundaryReadable = true;
+                    matchingBpbBoundaryCopy = Arrays.equals(primary, bpbBoundary);
+                } catch (IOException ignored) {
+                    bpbBoundaryReadable = false;
+                }
+                long trailingSectors = extentLastLba - bpbExpectedBackupLba;
+                if (trailingSectors <= 4096) {
+                    trailingInspectionComplete = true;
+                    for (long lba = bpbExpectedBackupLba + 1; lba <= extentLastLba; lba++) {
+                        try {
+                            long offset = Math.multiplyExact(lba, (long) sectorSize);
+                            byte[] sector = reader.read(offset, sectorSize);
+                            if (Arrays.equals(primary, sector)) {
+                                matchingTrailingLbas.add(lba);
+                            } else if (isZeroFilled(sector)) {
+                                zeroTrailingLbas.add(lba);
+                            } else {
+                                otherTrailingLbas.add(lba);
+                            }
+                        } catch (IOException e) {
+                            unreadableTrailingLbas.add(lba);
+                            trailingInspectionComplete = false;
+                        }
+                    }
+                }
+            }
+            NtfsBackupBootSectorEvidence backupEvidence = new NtfsBackupBootSectorEvidence(
+                    bpbExpectedBackupLba, extentLastLba,
+                    bpbBoundaryReadable, matchingBpbBoundaryCopy, matchingTrailingLbas,
+                    zeroTrailingLbas, otherTrailingLbas, unreadableTrailingLbas,
+                    trailingInspectionComplete);
+            return new BootSectorCheck(info, backupEvidence, extentStartingLba);
+        }
+    }
+
+    private static boolean isZeroFilled(byte[] bytes) {
+        for (byte value : bytes) {
+            if (value != 0) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private static long sumExtentBytes(List<DiskExtent> extents) throws IOException {
@@ -207,8 +368,14 @@ public final class WindowsVolumeService {
             }
             return total;
         } catch (ArithmeticException e) {
-            throw new IOException("Mapped volume extent capacity overflows", e);
+            throw new IOException("Переполнение размера сопоставленных областей тома.", e);
         }
+    }
+
+    private static List<String> append(List<String> messages, String message) {
+        List<String> result = new ArrayList<>(messages);
+        result.add(message);
+        return List.copyOf(result);
     }
 
     private static long sumPartitionBytes(List<WindowsPartitionInfo> partitions) throws IOException {
@@ -219,11 +386,11 @@ public final class WindowsVolumeService {
             }
             return total;
         } catch (ArithmeticException e) {
-            throw new IOException("Mapped partition capacity overflows", e);
+            throw new IOException("Переполнение размера сопоставленных разделов.", e);
         }
     }
 
-    private static boolean sameCandidate(ExternalVolumeCandidate first, ExternalVolumeCandidate second) {
+    private static boolean sameCandidate(VolumeAnalysisCandidate first, VolumeAnalysisCandidate second) {
         return first.physicalDiskNumber() == second.physicalDiskNumber()
                 && first.diskCapacityBytes() == second.diskCapacityBytes()
                 && first.logicalSectorSize() == second.logicalSectorSize()
@@ -273,7 +440,7 @@ public final class WindowsVolumeService {
             IntByReference flags = new IntByReference();
             if (!api.GetVolumeInformationW(volumePath, labelBuffer, labelBuffer.length, serial,
                     maxComponent, flags, fsBuffer, fsBuffer.length)) {
-                throw win32Error(api, "GetVolumeInformationW failed for " + volumePath);
+                throw win32Error(api, "Сбой GetVolumeInformationW для " + volumePath);
             }
             label = cString(labelBuffer);
             fileSystemName = cString(fsBuffer);
@@ -285,7 +452,7 @@ public final class WindowsVolumeService {
             LongByReference total = new LongByReference();
             LongByReference totalFree = new LongByReference();
             if (!api.GetDiskFreeSpaceExW(volumePath, freeAvailable, total, totalFree)) {
-                throw win32Error(api, "GetDiskFreeSpaceExW failed for " + volumePath);
+                throw win32Error(api, "Сбой GetDiskFreeSpaceExW для " + volumePath);
             }
             capacity = checkedUnsignedLong(total.getValue(), "volume capacity");
             available = checkedUnsignedLong(freeAvailable.getValue(), "available volume capacity");
@@ -295,23 +462,23 @@ public final class WindowsVolumeService {
             IntByReference totalClustersRef = new IntByReference();
             if (!api.GetDiskFreeSpaceW(volumePath, sectorsPerClusterRef, bytesPerSectorRef,
                     freeClustersRef, totalClustersRef)) {
-                throw win32Error(api, "GetDiskFreeSpaceW failed for " + volumePath);
+                throw win32Error(api, "Сбой GetDiskFreeSpaceW для " + volumePath);
             }
             sectorsPerCluster = sectorsPerClusterRef.getValue();
             bytesPerSector = bytesPerSectorRef.getValue();
             if (sectorsPerCluster <= 0 || bytesPerSector <= 0) {
-                throw new IOException("Windows returned invalid filesystem cluster geometry");
+                throw new IOException("Windows вернула недопустимую геометрию кластеров файловой системы.");
             }
             clusterSize = Math.multiplyExact((long) sectorsPerCluster, bytesPerSector);
             long totalFreeBytes = checkedUnsignedLong(totalFree.getValue(), "free volume capacity");
             if (totalFreeBytes > capacity || available > totalFreeBytes) {
-                throw new IOException("Windows returned inconsistent total/free/available volume capacities");
+                throw new IOException("Windows вернула несогласованные значения общей, свободной и доступной ёмкости тома.");
             }
             fileSystem = Optional.of(new VolumeFileSystemInfo(fileSystemName, label, volumeSerial,
                     maxComponentLength, capabilities, capacity, totalFreeBytes, available,
                     sectorsPerCluster, bytesPerSector));
         } catch (IOException | ArithmeticException | IllegalArgumentException e) {
-            diagnostics.add("Filesystem information unavailable for " + volumePath + ": " + e.getMessage());
+            diagnostics.add("Сведения о файловой системе недоступны для " + volumePath + ": " + e.getMessage());
             capacity = 0;
             available = 0;
             clusterSize = 0;
@@ -324,11 +491,11 @@ public final class WindowsVolumeService {
                 try {
                     extents = readVolumeExtents(api, volumeHandle);
                 } catch (IOException e) {
-                    diagnostics.add("Volume extent mapping failed for " + volumePath + ": " + e.getMessage());
+                    diagnostics.add("Не удалось сопоставить области тома " + volumePath + ": " + e.getMessage());
                 }
             } finally {
                 if (!api.CloseHandle(volumeHandle)) {
-                    diagnostics.add(win32Error(api, "Could not close volume handle").getMessage());
+                    diagnostics.add(win32Error(api, "Не удалось закрыть дескриптор тома").getMessage());
                 }
             }
         }
@@ -343,18 +510,19 @@ public final class WindowsVolumeService {
         api.GetVolumePathNamesForVolumeNameW(volumePath, null, 0, required);
         int error = api.GetLastError();
         if (error != ERROR_MORE_DATA && error != 0) {
-            throw new IOException("GetVolumePathNamesForVolumeNameW failed (Win32 error " + error + ")");
+            throw new IOException("Сбой GetVolumePathNamesForVolumeNameW (ошибка Win32 " + error + " "
+                    + Win32ErrorNames.name(error) + ").");
         }
         int chars = required.getValue();
         if (chars <= 0) {
             return List.of();
         }
         if (chars > MAX_VOLUME_PATH_CHARS) {
-            throw new IOException("Volume mount-point list exceeds the safety limit");
+            throw new IOException("Список точек подключения тома превышает ограничение безопасности.");
         }
         char[] buffer = new char[chars];
         if (!api.GetVolumePathNamesForVolumeNameW(volumePath, buffer, buffer.length, required)) {
-            throw win32Error(api, "Could not read mount points for " + volumePath);
+            throw win32Error(api, "Не удалось получить точки подключения для " + volumePath);
         }
         List<String> paths = new ArrayList<>();
         int start = 0;
@@ -380,11 +548,13 @@ public final class WindowsVolumeService {
         Pointer handle = api.CreateFileW(openPath, desiredAccess,
                 shareMode, null, OPEN_EXISTING, 0, null);
         if (isInvalidHandle(handle)) {
-            diagnostics.add("CreateFileW failed for " + purpose + " at " + openPath
+            int error = api.GetLastError();
+            diagnostics.add("Не удалось выполнить CreateFileW для операции «" + purpose + "» по адресу " + openPath
                     + " (desiredAccess=0x" + Integer.toHexString(desiredAccess)
                     + ", shareMode=0x" + Integer.toHexString(shareMode)
                     + ", creationDisposition=" + OPEN_EXISTING
-                    + ", flagsAndAttributes=0, Win32 error " + api.GetLastError() + ")");
+                    + ", flagsAndAttributes=0, ошибка Win32 " + error + " "
+                    + Win32ErrorNames.name(error) + ")");
             return null;
         }
         return handle;
@@ -393,32 +563,32 @@ public final class WindowsVolumeService {
     private static VolumeInspection unavailableVolume(String volumePath, RuntimeException error) {
         VolumeInfo volume = new VolumeInfo(volumePath, List.of(), "", "", 0, 0, 0);
         return new VolumeInspection(volume, Optional.empty(), List.of(), Optional.empty(),
-                List.of("Volume inspection failed: " + error.getMessage()));
+                List.of("Не удалось проверить том: " + error.getMessage()));
     }
 
     private static List<DiskExtent> readVolumeExtents(Kernel32 api, Pointer handle) throws IOException {
         if (Native.POINTER_SIZE != 8) {
-            throw new IOException("Volume extent structure decoding is enabled only for 64-bit Windows processes");
+            throw new IOException("Декодирование областей тома поддерживается только в 64-разрядном процессе Windows.");
         }
         byte[] buffer = new byte[VOLUME_EXTENTS_BUFFER_SIZE];
         IntByReference bytesReturned = new IntByReference();
         if (!api.DeviceIoControl(handle, IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS,
                 null, 0, buffer, buffer.length, bytesReturned, null)) {
-            throw win32Error(api, "IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS failed "
-                    + "(volume handle desiredAccess=0, sharing=READ|WRITE|DELETE)");
+            throw win32Error(api, "Сбой IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS "
+                    + "(доступ к дескриптору тома desiredAccess=0, совместный доступ READ|WRITE|DELETE)");
         }
         if (bytesReturned.getValue() < 4 || bytesReturned.getValue() > buffer.length) {
-            throw new IOException("Windows returned an invalid volume extent response length");
+            throw new IOException("Windows вернула недопустимую длину ответа с областями тома.");
         }
         int count = i32(buffer, 0);
         if (count < 0 || count > MAX_EXTENTS) {
-            throw new IOException("Volume extent count is invalid or exceeds safety limit");
+            throw new IOException("Количество областей тома недопустимо или превышает ограничение безопасности.");
         }
         int firstExtentOffset = 8;
         int extentSize = 24;
         long required = (long) firstExtentOffset + (long) count * extentSize;
         if (required > bytesReturned.getValue()) {
-            throw new IOException("Windows returned an incomplete volume disk extent array");
+            throw new IOException("Windows вернула неполный массив дисковых областей тома.");
         }
         List<DiskExtent> extents = new ArrayList<>(count);
         for (int i = 0; i < count; i++) {
@@ -427,12 +597,12 @@ public final class WindowsVolumeService {
             long start = i64(buffer, offset + 8);
             long length = i64(buffer, offset + 16);
             if (diskNumber < 0 || start < 0 || length < 0) {
-                throw new IOException("Windows returned invalid volume extent values");
+                throw new IOException("Windows вернула недопустимые значения дисковой области тома.");
             }
             try {
                 Math.addExact(start, length);
             } catch (ArithmeticException e) {
-                throw new IOException("Volume extent boundary overflows", e);
+                throw new IOException("Граница дисковой области тома выходит за допустимые пределы.", e);
             }
             extents.add(new DiskExtent(diskNumber, start, length));
         }
@@ -448,7 +618,8 @@ public final class WindowsVolumeService {
 
     private static long checkedUnsignedLong(long value, String field) throws IOException {
         if (value < 0) {
-            throw new IOException("Windows returned " + field + " outside the supported signed 64-bit range");
+            throw new IOException("Windows вернула значение поля «" + field
+                    + "» за пределами поддерживаемого знакового 64-разрядного диапазона.");
         }
         return value;
     }
@@ -481,13 +652,26 @@ public final class WindowsVolumeService {
         long high = Integer.toUnsignedLong(i32(bytes, offset + 4));
         long value = (high << 32) | low;
         if (value < 0) {
-            throw new IllegalArgumentException("unsigned value exceeds signed 64-bit range");
+            throw new IllegalArgumentException("Беззнаковое значение превышает знаковый 64-разрядный диапазон.");
         }
         return value;
     }
 
     private static IOException win32Error(Kernel32 api, String message) {
-        return new IOException(message + " (Win32 error " + api.GetLastError() + ")");
+        int error = api.GetLastError();
+        return new IOException(message + " (ошибка Win32 " + error + " "
+                + Win32ErrorNames.name(error) + ")");
+    }
+
+    private static String closeVolumeError(Kernel32 api) {
+        int error = api.GetLastError();
+        return "Сбой FindVolumeClose (ошибка Win32 " + error + " " + Win32ErrorNames.name(error) + ").";
+    }
+
+    private record BootSectorCheck(
+            NtfsBootSectorInfo info,
+            NtfsBackupBootSectorEvidence backupEvidence,
+            long extentStartingLba) {
     }
 
     private interface Kernel32 extends StdCallLibrary {

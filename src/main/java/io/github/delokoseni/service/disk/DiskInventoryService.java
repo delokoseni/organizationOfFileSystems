@@ -2,9 +2,7 @@ package io.github.delokoseni.service.disk;
 
 import io.github.delokoseni.model.DiskInfo;
 import io.github.delokoseni.model.DiskExtent;
-import io.github.delokoseni.model.DeviceIdentification;
 import io.github.delokoseni.model.PartitionStyle;
-import io.github.delokoseni.model.VolumeInfo;
 import io.github.delokoseni.model.VolumeInspection;
 import io.github.delokoseni.service.diagnostics.DiagnosticFinding;
 import io.github.delokoseni.service.diagnostics.DiagnosticService;
@@ -12,23 +10,18 @@ import io.github.delokoseni.service.parser.PartitionComparisonService;
 import io.github.delokoseni.service.parser.PartitionTableAnalysis;
 import io.github.delokoseni.service.parser.PartitionTableAnalysisService;
 import io.github.delokoseni.service.volume.VolumePartitionMappingService;
-import io.github.delokoseni.service.volume.ExternalVolumeCandidate;
-import io.github.delokoseni.service.volume.VolumeDiskMappingService;
 import io.github.delokoseni.service.volume.WindowsVolumeService;
 
 import java.io.IOException;
 import java.util.ArrayList;
-import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
 public final class DiskInventoryService {
     private final DiskEnumerator diskEnumerator;
     private final VolumeEnumerator volumeEnumerator;
-    private final ExternalDeviceVerifier externalDeviceVerifier;
     private final DiagnosticService diagnostics = new DiagnosticService();
 
     public DiskInventoryService() {
@@ -36,16 +29,12 @@ public final class DiskInventoryService {
     }
 
     private DiskInventoryService(DiskEnumerator diskEnumerator, WindowsVolumeService volumeService) {
-        this(diskEnumerator, volumeService::enumerate, volumeService::verifyExternalAdataD);
+        this(diskEnumerator, volumeService::enumerate);
     }
 
-    DiskInventoryService(
-            DiskEnumerator diskEnumerator,
-            VolumeEnumerator volumeEnumerator,
-            ExternalDeviceVerifier externalDeviceVerifier) {
+    DiskInventoryService(DiskEnumerator diskEnumerator, VolumeEnumerator volumeEnumerator) {
         this.diskEnumerator = diskEnumerator;
         this.volumeEnumerator = volumeEnumerator;
-        this.externalDeviceVerifier = externalDeviceVerifier;
     }
 
     public DiskInventory inspect() throws IOException {
@@ -55,10 +44,10 @@ public final class DiskInventoryService {
             enumeration = diskEnumerator.enumerate();
         } catch (IOException e) {
             enumeration = new DiskEnumerationResult(List.of(),
-                    List.of("Physical disk enumeration failed: " + e.getMessage()));
+                    List.of("Не удалось обнаружить физические диски: " + e.getMessage()));
         }
         List<DiscoveredPhysicalDisk> discoveredDisks = enumeration.disks();
-        inventoryFindings.addAll(diagnostics.classify("Physical disk enumeration",
+        inventoryFindings.addAll(diagnostics.classify("Обнаружение физических дисков",
                 enumeration.diagnostics()));
         List<VolumeInspection> volumes;
         try {
@@ -67,18 +56,8 @@ public final class DiskInventoryService {
             volumes = List.of();
             inventoryFindings.add(new DiagnosticFinding(
                     io.github.delokoseni.service.diagnostics.DiagnosticSeverity.ERROR,
-                    "Volume enumeration", "Volume enumeration failed independently of physical disk "
-                    + "discovery: " + e.getMessage()));
-        }
-        Optional<ExternalVolumeCandidate> adataCandidate = Optional.empty();
-        String adataEligibilityMessage = "";
-        try {
-            adataCandidate = Optional.of(externalDeviceVerifier.verify(volumes));
-        } catch (IOException e) {
-            adataEligibilityMessage = e.getMessage();
-            inventoryFindings.add(new DiagnosticFinding(
-                    io.github.delokoseni.service.diagnostics.DiagnosticSeverity.WARNING,
-                    "ADATA SE760 (D:) eligibility", adataEligibilityMessage));
+                    "Обнаружение томов", "Не удалось отдельно от обнаружения физических дисков "
+                    + "перечислить тома: " + e.getMessage()));
         }
         Set<Integer> diskNumbers = diskNumbers(discoveredDisks, volumes);
         List<DiskAnalysis> disks = new ArrayList<>();
@@ -92,7 +71,7 @@ public final class DiskInventoryService {
             DiskInfo disk = new DiskInfo(diskNumber, discovered.devicePath(), discovered.model(), "", "",
                     0, 0, 0, false, PartitionStyle.UNKNOWN);
             disks.add(new DiskAnalysis(disk, Optional.empty(), Optional.empty(), mappedVolumes, List.of(),
-                    RawDiskAccessStatus.DISCOVERED, "Raw disk access has not been attempted."));
+                    RawDiskAccessStatus.DISCOVERED, "Чтение диска ещё не выполнялось."));
         }
         for (VolumeInspection volume : volumes) {
             if (!volume.diagnostics().isEmpty()) {
@@ -103,30 +82,17 @@ public final class DiskInventoryService {
         if (disks.isEmpty()) {
             inventoryFindings.add(new DiagnosticFinding(
                     io.github.delokoseni.service.diagnostics.DiagnosticSeverity.WARNING,
-                    "Disk inventory",
-                    "No physical disk interfaces or physical-disk volume extents were discovered."));
+                    "Инвентаризация дисков",
+                    "Не обнаружены интерфейсы физических дисков или дисковые области томов."));
         }
-        List<VolumeInfo> volumeInfo = volumes.stream()
-                .map(VolumeInspection::volume)
-                .toList();
-        Map<String, List<DiskExtent>> extentsByVolumeGuid = new LinkedHashMap<>();
-        for (VolumeInspection volume : volumes) {
-            extentsByVolumeGuid.put(volume.volume().volumeGuidPath(), volume.diskExtents());
-        }
-        Map<String, Set<Integer>> disksByVolumeGuid =
-                new VolumeDiskMappingService().mapVolumesToDisks(volumeInfo, extentsByVolumeGuid);
-        DeviceIdentification adataIdentification =
-                new ExternalDeviceIdentificationService().identifyExpectedDevice(
-                        disks.stream().map(DiskAnalysis::disk).toList(), volumeInfo, disksByVolumeGuid);
-        return new DiskInventory(disks, volumes, inventoryFindings,
-                adataCandidate, adataEligibilityMessage, adataIdentification);
+        return new DiskInventory(disks, volumes, inventoryFindings);
     }
 
     public DiskAnalysis inspectDisk(int diskNumber, DiskInventory inventory) {
         DiskAnalysis discovered = inventory.disks().stream()
                 .filter(disk -> disk.disk().diskNumber() == diskNumber)
                 .findFirst()
-                .orElseThrow(() -> new IllegalArgumentException("Disk was not found in current inventory"));
+                .orElseThrow(() -> new IllegalArgumentException("Выбранный диск отсутствует в текущем списке."));
         DiscoveredPhysicalDisk physicalDisk = new DiscoveredPhysicalDisk(
                 diskNumber, discovered.disk().devicePath(), discovered.disk().model());
         return inspectOne(physicalDisk, inventory.volumes());
@@ -156,13 +122,22 @@ public final class DiskInventoryService {
             try {
                 identity = reader.readStorageDeviceIdentity();
             } catch (IOException e) {
-                diskMessages.add("Storage identity unavailable: " + e.getMessage());
+                diskMessages.add("Идентификатор устройства хранения недоступен: " + e.getMessage());
+            }
+            if (!discovered.model().isBlank()) {
+                if (identity == null) {
+                    throw new IOException("Не удалось повторно подтвердить модель выбранного диска; анализ остановлен.");
+                }
+                if (!modelsMatch(discovered.model(), identity.modelName())) {
+                    throw new IOException("Модель устройства на выбранном номере диска изменилась; "
+                            + "анализ остановлен без выбора другого диска.");
+                }
             }
             int physicalSectorSize = 0;
             try {
                 physicalSectorSize = reader.readPhysicalSectorSize();
             } catch (IOException e) {
-                diskMessages.add("Physical sector size unavailable: " + e.getMessage());
+                diskMessages.add("Размер физического сектора недоступен: " + e.getMessage());
             }
 
             PartitionTableAnalysis partitionTable = null;
@@ -170,7 +145,7 @@ public final class DiskInventoryService {
                 partitionTable = new PartitionTableAnalysisService().analyze(reader);
                 diskMessages.addAll(partitionTable.diagnostics());
             } catch (IOException | RuntimeException e) {
-                diskMessages.add("Independent partition analysis failed: " + e.getMessage());
+                diskMessages.add("Независимый анализ разделов завершился ошибкой: " + e.getMessage());
             }
 
             WindowsPartitionLayout windowsLayout = null;
@@ -181,7 +156,7 @@ public final class DiskInventoryService {
                             partitionTable.style(), partitionTable.partitions(), windowsLayout));
                 }
             } catch (IOException | RuntimeException e) {
-                diskMessages.add("Windows partition layout unavailable: " + e.getMessage());
+                diskMessages.add("Разметка разделов Windows недоступна: " + e.getMessage());
             }
             if (windowsLayout != null) {
                 for (VolumeInspection volume : mappedVolumes) {
@@ -192,8 +167,8 @@ public final class DiskInventoryService {
                             diskExtents, java.util.Map.of(diskNumber, windowsLayout.partitions()));
                     for (var mapping : mappings) {
                         if (!mapping.isUnambiguous()) {
-                            diskMessages.add("Volume " + volume.volume().volumeGuidPath()
-                                    + " mapping problem: " + mapping.diagnostic() + ".");
+                            diskMessages.add("Проблема сопоставления тома " + volume.volume().volumeGuidPath()
+                                    + ": " + mapping.diagnostic() + ".");
                         }
                     }
                 }
@@ -210,8 +185,8 @@ public final class DiskInventoryService {
                     identity != null && identity.removableMedia(), style);
             return new DiskAnalysis(disk, Optional.ofNullable(partitionTable),
                     Optional.ofNullable(windowsLayout), mappedVolumes,
-                    diagnostics.classify("Physical disk " + diskNumber, diskMessages),
-                    RawDiskAccessStatus.READ_ACCESS_AVAILABLE, "Read access available");
+                    diagnostics.classify("Физический диск " + diskNumber, diskMessages),
+                    RawDiskAccessStatus.READ_ACCESS_AVAILABLE, "Доступно чтение");
         } catch (DiskOpenException e) {
             RawDiskAccessStatus status = RawDiskAccessStatus.fromWin32Error(e.win32Error());
             String message = e.getMessage();
@@ -223,7 +198,7 @@ public final class DiskInventoryService {
             return unavailableAnalysis(discovered, path, mappedVolumes, message, status);
         } catch (IOException | RuntimeException e) {
             return unavailableAnalysis(discovered, path, mappedVolumes,
-                    "Physical disk could not be read with read-only access: " + e.getMessage(),
+                    "Не удалось прочитать физический диск в режиме только для чтения: " + e.getMessage(),
                     RawDiskAccessStatus.INFORMATION_UNAVAILABLE);
         }
     }
@@ -241,11 +216,32 @@ public final class DiskInventoryService {
             try {
                 message += " " + new WindowsPrivilegeService().accessDeniedGuidance();
             } catch (IOException privilegeError) {
-                message += ". Administrator status could not be determined: "
+                message += ". Не удалось определить статус администратора: "
                         + privilegeError.getMessage();
             }
         }
         return message;
+    }
+
+    static boolean modelsMatch(String discoveredModel, String currentModel) {
+        String discovered = normalizeModel(discoveredModel);
+        String current = normalizeModel(currentModel);
+        String discoveredLower = discovered.toLowerCase(java.util.Locale.ROOT);
+        String currentLower = current.toLowerCase(java.util.Locale.ROOT);
+        return !discovered.isBlank() && !current.isBlank()
+                && (discoveredLower.equals(currentLower)
+                || Math.min(discoveredLower.length(), currentLower.length()) >= 6
+                && (discoveredLower.contains(currentLower) || currentLower.contains(discoveredLower)));
+    }
+
+    private static String normalizeModel(String model) {
+        String normalized = model == null ? "" : model.trim();
+        String suffix = " SCSI Disk Device";
+        if (normalized.regionMatches(true,
+                Math.max(0, normalized.length() - suffix.length()), suffix, 0, suffix.length())) {
+            normalized = normalized.substring(0, normalized.length() - suffix.length()).trim();
+        }
+        return normalized;
     }
 
     static DiskAnalysis unavailableAnalysis(
@@ -254,7 +250,7 @@ public final class DiskInventoryService {
         DiskInfo disk = new DiskInfo(discovered.diskNumber(), path, discovered.model(), "", "",
                 0, 0, 0, false, PartitionStyle.UNKNOWN);
         return new DiskAnalysis(disk, Optional.empty(), Optional.empty(), mappedVolumes,
-                new DiagnosticService().classify("Physical disk " + discovered.diskNumber(), List.of(message)),
+                new DiagnosticService().classify("Физический диск " + discovered.diskNumber(), List.of(message)),
                 status, message);
     }
 }

@@ -40,13 +40,13 @@ class VolumePartitionMappingServiceTest {
         var ambiguous = service.map(List.of(new DiskExtent(5, 1024, 1024)),
                 Map.of(5, List.of(partition(1, 0, 4096), partition(2, 0, 4096)))).getFirst();
         assertFalse(ambiguous.isUnambiguous());
-        assertTrue(ambiguous.diagnostic().contains("ambiguously"));
+        assertTrue(ambiguous.diagnostic().contains("неоднозначно"));
     }
 
     @Test
     void reportsOverflowingExtentRange() {
         var mapping = service.map(List.of(new DiskExtent(5, Long.MAX_VALUE, 1)), Map.of()).getFirst();
-        assertTrue(mapping.diagnostic().contains("overflows"));
+        assertTrue(mapping.diagnostic().contains("переполняются"));
     }
 
     private static WindowsPartitionInfo partition(int number, long offset, long length) {

@@ -44,14 +44,14 @@ public final class FileSystemCapabilities {
     };
 
     private static final String[] NAMES = {
-            "Case-sensitive search", "Case-preserved names", "Unicode on disk",
-            "Persistent ACLs", "File compression", "Disk quotas",
-            "Sparse files", "Reparse points", "Remote storage",
-            "Volume compressed", "Object IDs", "File encryption",
-            "Named streams", "Read-only volume", "Sequential write-once",
-            "Transactions", "Hard links", "Extended attributes",
-            "Open by file ID", "USN journal", "Integrity streams",
-            "Block refcounting", "Sparse valid-data length", "Ghosting"
+            "Поиск с учётом регистра", "Имена с сохранением регистра", "Unicode на диске",
+            "Постоянные ACL", "Сжатие файлов", "Квоты диска",
+            "Разреженные файлы", "Точки повторной обработки", "Удалённое хранилище",
+            "Сжатый том", "Идентификаторы объектов", "Шифрование файлов",
+            "Именованные потоки", "Том только для чтения", "Последовательная однократная запись",
+            "Транзакции", "Жёсткие ссылки", "Расширенные атрибуты",
+            "Открытие по идентификатору файла", "Журнал USN", "Потоки целостности",
+            "Подсчёт ссылок на блоки", "Разрежённая длина действительных данных", "Призрачные файлы"
     };
 
     private FileSystemCapabilities() {

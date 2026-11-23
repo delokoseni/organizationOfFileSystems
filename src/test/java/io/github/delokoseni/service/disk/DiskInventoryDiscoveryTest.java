@@ -1,7 +1,6 @@
 package io.github.delokoseni.service.disk;
 
 import io.github.delokoseni.model.DiskExtent;
-import io.github.delokoseni.model.DeviceIdentification;
 import io.github.delokoseni.model.VolumeInfo;
 import io.github.delokoseni.model.VolumeInspection;
 import org.junit.jupiter.api.Test;
@@ -40,6 +39,15 @@ class DiskInventoryDiscoveryTest {
     }
 
     @Test
+    void selectedDiskIdentityComparisonIsModelBasedNotDiskNumberBased() {
+        assertTrue(DiskInventoryService.modelsMatch(
+                "ADATA SE760 SCSI Disk Device", "ADATA SE760"));
+        assertTrue(DiskInventoryService.modelsMatch("Portable SSD", "Vendor Portable SSD"));
+        org.junit.jupiter.api.Assertions.assertFalse(
+                DiskInventoryService.modelsMatch("Model A", "Model B"));
+    }
+
+    @Test
     void retainsCreateFileParametersInAccessFailure() {
         DiskOpenException failure = new DiskOpenException(
                 "\\\\.\\PhysicalDrive12", 0x80000000, 3, 3, 0, 5);
@@ -58,8 +66,7 @@ class DiskInventoryDiscoveryTest {
                 new DiscoveredPhysicalDisk(9, "\\\\.\\PhysicalDrive9", "Internal disk"));
         DiskInventoryService service = new DiskInventoryService(
                 () -> new DiskEnumerationResult(discovered, List.of()),
-                List::of,
-                ignored -> { throw new IOException("D: is unavailable"); });
+                List::of);
 
         var inventory = service.inspect();
 
@@ -67,7 +74,6 @@ class DiskInventoryDiscoveryTest {
                 inventory.disks().stream().map(disk -> disk.disk().diskNumber()).sorted().toList());
         assertTrue(inventory.disks().stream()
                 .allMatch(disk -> disk.accessStatus() == RawDiskAccessStatus.DISCOVERED));
-        assertTrue(inventory.adataCandidate().isEmpty());
     }
 
     @Test
@@ -76,15 +82,14 @@ class DiskInventoryDiscoveryTest {
                 new DiscoveredPhysicalDisk(4, "\\\\.\\PhysicalDrive4", "Disk 4"));
         DiskInventoryService service = new DiskInventoryService(
                 () -> new DiskEnumerationResult(discovered, List.of()),
-                () -> { throw new IOException("volume access denied"); },
-                ignored -> { throw new IOException("D: unavailable"); });
+                () -> { throw new IOException("volume access denied"); });
 
         var inventory = service.inspect();
 
         assertEquals(1, inventory.disks().size());
         assertEquals(4, inventory.disks().getFirst().disk().diskNumber());
         assertTrue(inventory.diagnostics().stream()
-                .anyMatch(finding -> finding.scope().equals("Volume enumeration")));
+                .anyMatch(finding -> finding.scope().equals("Обнаружение томов")));
     }
 
     @Test
@@ -94,8 +99,7 @@ class DiskInventoryDiscoveryTest {
                 List.of(new DiskExtent(6, 0, 4096)), Optional.empty(), List.of());
         DiskInventoryService service = new DiskInventoryService(
                 () -> { throw new IOException("SetupAPI unavailable"); },
-                () -> List.of(volume),
-                ignored -> { throw new IOException("D: identity unavailable"); });
+                () -> List.of(volume));
 
         var inventory = service.inspect();
 
@@ -103,12 +107,12 @@ class DiskInventoryDiscoveryTest {
         assertEquals(List.of(6), inventory.disks().stream()
                 .map(disk -> disk.disk().diskNumber()).toList());
         assertTrue(inventory.diagnostics().stream()
-                .anyMatch(finding -> finding.scope().equals("Physical disk enumeration")
+                .anyMatch(finding -> finding.scope().equals("Обнаружение физических дисков")
                         && finding.message().contains("SetupAPI unavailable")));
     }
 
     @Test
-    void identifiesPreferredDeviceFromPnpModelAndDMappingWhenRawReadIsUnavailable() throws Exception {
+    void keepsAnyDiscoveredModelAvailableWhenRawReadIsUnavailable() throws Exception {
         var adata = new DiscoveredPhysicalDisk(
                 3, "\\\\.\\PhysicalDrive3", "ADATA SE760 SCSI Disk Device");
         var volume = new VolumeInspection(new VolumeInfo("\\\\?\\Volume{d}\\", List.of("D:\\"),
@@ -116,14 +120,12 @@ class DiskInventoryDiscoveryTest {
                 List.of(new DiskExtent(3, 0, 4096)), Optional.empty(), List.of());
         DiskInventoryService service = new DiskInventoryService(
                 () -> new DiskEnumerationResult(List.of(adata), List.of()),
-                () -> List.of(volume),
-                ignored -> { throw new IOException("raw read denied"); });
+                () -> List.of(volume));
 
         var inventory = service.inspect();
 
-        assertTrue(inventory.adataCandidate().isEmpty());
-        assertEquals(DeviceIdentification.Status.IDENTIFIED, inventory.adataIdentification().status());
-        assertEquals(3, inventory.adataIdentification().disk().orElseThrow().diskNumber());
+        assertEquals("ADATA SE760 SCSI Disk Device", inventory.disks().getFirst().disk().model());
+        assertEquals(3, inventory.volumes().getFirst().diskExtents().getFirst().diskNumber());
     }
 
     @Test

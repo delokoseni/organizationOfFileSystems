@@ -37,7 +37,7 @@ class GptParserTest {
         badHeader[SECTOR + 16] ^= 0x01;
         GptParseResult badHeaderResult = parser.parse(reader(badHeader));
         assertTrue(badHeaderResult.diagnostics().stream()
-                .anyMatch(text -> text.contains("header CRC32")));
+                .anyMatch(text -> text.contains("CRC32 заголовка GPT")));
         assertEquals(1, badHeaderResult.partitions().size(),
                 "A valid backup GPT should be used when the primary header CRC is invalid");
 
@@ -45,7 +45,7 @@ class GptParserTest {
         badArray[2 * SECTOR + 64] ^= 0x01;
         badArray[254 * SECTOR + 64] ^= 0x01;
         GptParseResult result = parser.parse(reader(badArray));
-        assertTrue(result.diagnostics().stream().anyMatch(text -> text.contains("array CRC32")));
+        assertTrue(result.diagnostics().stream().anyMatch(text -> text.contains("CRC32 массива разделов")));
         assertTrue(result.partitions().isEmpty(),
                 "Entries with invalid primary and backup array CRCs must not be displayed");
     }
@@ -56,14 +56,14 @@ class GptParserTest {
         Arrays.fill(missingBackup, (DISK_SECTORS - 1) * SECTOR,
                 DISK_SECTORS * SECTOR, (byte) 0);
         assertTrue(parser.parse(reader(missingBackup)).diagnostics().stream()
-                .anyMatch(text -> text.contains("Backup GPT header is missing")));
+                .anyMatch(text -> text.contains("Резервный заголовок GPT отсутствует")));
 
         byte[] inconsistent = validGpt(128);
         inconsistent[254 * SECTOR + 64] ^= 0x01;
         updateArrayCrc(inconsistent, 254, 1, 128);
         updateHeaderCrc(inconsistent, 255);
         GptParseResult result = parser.parse(reader(inconsistent));
-        assertTrue(result.diagnostics().stream().anyMatch(text -> text.contains("entries differ")));
+        assertTrue(result.diagnostics().stream().anyMatch(text -> text.contains("Записи разделов")));
     }
 
     @Test
@@ -71,13 +71,16 @@ class GptParserTest {
         byte[] missingPrimary = validGpt(128);
         Arrays.fill(missingPrimary, SECTOR, 2 * SECTOR, (byte) 0);
         assertTrue(parser.parse(reader(missingPrimary)).diagnostics().stream()
-                .anyMatch(text -> text.contains("Primary GPT header is missing")));
+                .anyMatch(text -> text.contains("Основной заголовок GPT отсутствует")));
 
         byte[] differentGuid = validGpt(128);
         differentGuid[255 * SECTOR + 56] ^= 0x01;
         updateHeaderCrc(differentGuid, 255);
         assertTrue(parser.parse(reader(differentGuid)).diagnostics().stream()
-                .anyMatch(text -> text.contains("disk GUIDs differ")));
+                .anyMatch(text -> text.contains("GUID диска")));
+        PartitionTableAnalysis ambiguous = new PartitionTableAnalysisService().analyze(reader(differentGuid));
+        assertEquals(io.github.delokoseni.model.PartitionStyle.AMBIGUOUS, ambiguous.style());
+        assertTrue(ambiguous.partitions().isEmpty());
     }
 
     @Test
@@ -86,7 +89,7 @@ class GptParserTest {
         put64(wrongBackupLocation, 255 * SECTOR + 24, 254);
         updateHeaderCrc(wrongBackupLocation, 255);
         assertTrue(parser.parse(reader(wrongBackupLocation)).diagnostics().stream()
-                .anyMatch(text -> text.contains("incorrect current LBA")));
+                .anyMatch(text -> text.contains("неверный текущий LBA")));
 
         byte[] invalidUsableRange = validGpt(128);
         put64(invalidUsableRange, SECTOR + 40, 230);
@@ -94,7 +97,7 @@ class GptParserTest {
         updateHeaderCrc(invalidUsableRange, 1);
         updateHeaderCrc(invalidUsableRange, 255);
         assertTrue(parser.parse(reader(invalidUsableRange)).diagnostics().stream()
-                .anyMatch(text -> text.contains("usable LBA range is invalid")));
+                .anyMatch(text -> text.contains("Недопустимый диапазон доступных LBA")));
     }
 
     @Test
@@ -112,7 +115,7 @@ class GptParserTest {
         put64(overflowingLba, SECTOR + 24, Long.MIN_VALUE);
         updateHeaderCrc(overflowingLba, 1);
         assertTrue(parser.parse(reader(overflowingLba)).diagnostics().stream()
-                .anyMatch(text -> text.contains("unsigned 64-bit")));
+                .anyMatch(text -> text.contains("беззнаковое 64-разрядное")));
     }
 
     @Test
@@ -126,11 +129,11 @@ class GptParserTest {
         updateHeaderCrc(invalidBounds, 1);
         updateHeaderCrc(invalidBounds, 255);
         assertTrue(parser.parse(reader(invalidBounds)).diagnostics().stream()
-                .anyMatch(text -> text.contains("invalid LBA boundaries")));
+                .anyMatch(text -> text.contains("недопустимые границы LBA")));
 
         byte[] invalidEntrySize = validGpt(129);
         assertTrue(parser.parse(reader(invalidEntrySize)).diagnostics().stream()
-                .anyMatch(text -> text.contains("entry count or size")));
+                .anyMatch(text -> text.contains("Число или размер записей")));
     }
 
     @Test
@@ -144,7 +147,116 @@ class GptParserTest {
         put32(oversized, SECTOR + 80, 1_048_577);
         updateHeaderCrc(oversized, 1);
         assertTrue(parser.parse(reader(oversized)).diagnostics().stream()
-                .anyMatch(text -> text.contains("parser limits")));
+                .anyMatch(text -> text.contains("пределы анализатора")));
+
+        byte[] oversizedProtectiveEntry = validGpt(128);
+        put32(oversizedProtectiveEntry, 446 + 12, -1);
+        GptParseResult oversizedProtectiveResult = parser.parse(reader(oversizedProtectiveEntry));
+        assertFalse(oversizedProtectiveResult.protectiveMbrValid());
+        assertTrue(oversizedProtectiveResult.diagnostics().stream().anyMatch(text ->
+                text.contains("Защитная запись MBR 0xEE присутствует")
+                        && text.contains("задаёт диапазон LBA [1, 4294967295]")
+                        && text.contains("ожидается [1, 255]")));
+        assertEquals(io.github.delokoseni.service.diagnostics.DiagnosticSeverity.WARNING,
+                new io.github.delokoseni.service.diagnostics.DiagnosticService()
+                        .classify("Физический диск 1", oversizedProtectiveResult.diagnostics()).stream()
+                        .filter(finding -> finding.message().contains("Защитная запись MBR"))
+                        .findFirst().orElseThrow().severity());
+        assertEquals(1, oversizedProtectiveResult.partitions().size(),
+                "A malformed protective MBR range does not invalidate CRC-verified GPT data");
+    }
+
+    @Test
+    void identifiesConventionalMbrAndValidProtectiveGptFromVerifiedStructures() throws Exception {
+        byte[] conventionalMbr = new byte[DISK_SECTORS * SECTOR];
+        putMbrEntry(conventionalMbr, 446, 0x07, 40, 20);
+        conventionalMbr[510] = 0x55;
+        conventionalMbr[511] = (byte) 0xaa;
+        PartitionTableAnalysis mbr = new PartitionTableAnalysisService().analyze(reader(conventionalMbr));
+        assertEquals(io.github.delokoseni.model.PartitionStyle.MBR, mbr.style());
+        assertEquals(1, mbr.partitions().size());
+        assertTrue(mbr.diagnostics().isEmpty(),
+                "A conventional MBR layout does not require a protective 0xEE entry");
+
+        PartitionTableAnalysis gpt = new PartitionTableAnalysisService().analyze(reader(validGpt(128)));
+        assertEquals(io.github.delokoseni.model.PartitionStyle.GPT, gpt.style());
+        assertEquals(1, gpt.partitions().size());
+        assertTrue(gpt.gpt().orElseThrow().protectiveMbrValid());
+    }
+
+    @Test
+    void fallsBackToOnlyTheCrcVerifiedGptArray() throws Exception {
+        byte[] invalidPrimary = validGpt(128);
+        invalidPrimary[2 * SECTOR + 64] ^= 0x01;
+        PartitionTableAnalysis primaryFallback = new PartitionTableAnalysisService()
+                .analyze(reader(invalidPrimary));
+        assertEquals(io.github.delokoseni.model.PartitionStyle.GPT, primaryFallback.style());
+        assertEquals(1, primaryFallback.partitions().size());
+
+        byte[] invalidBackup = validGpt(128);
+        invalidBackup[254 * SECTOR + 64] ^= 0x01;
+        PartitionTableAnalysis backupFallback = new PartitionTableAnalysisService()
+                .analyze(reader(invalidBackup));
+        assertEquals(io.github.delokoseni.model.PartitionStyle.GPT, backupFallback.style());
+        assertEquals(1, backupFallback.partitions().size());
+        assertTrue(backupFallback.diagnostics().stream()
+                .anyMatch(text -> text.contains("CRC32 массива разделов GPT (Резервная копия)")));
+    }
+
+    @Test
+    void retainsValidMbrWhenGptMetadataIsStaleAndReportsHybridOrInvalidLayouts() throws Exception {
+        byte[] stale = validGpt(128);
+        Arrays.fill(stale, 2 * SECTOR, 2 * SECTOR + 128, (byte) 0);
+        updateArrayCrc(stale, 2, 1, 128);
+        updateHeaderCrc(stale, 1);
+        putMbrEntry(stale, 446, 0x07, 40, 215);
+        stale[446 + 4] = 0x07;
+        stale[510] = 0x55;
+        stale[511] = (byte) 0xaa;
+        stale[254 * SECTOR + 64] ^= 0x01;
+        PartitionTableAnalysis mbr = new PartitionTableAnalysisService().analyze(reader(stale));
+        assertEquals(io.github.delokoseni.model.PartitionStyle.MBR, mbr.style());
+        assertEquals(1, mbr.partitions().size());
+        assertTrue(mbr.diagnostics().stream().anyMatch(text -> text.contains("действительная таблица MBR")));
+        assertTrue(mbr.diagnostics().stream().anyMatch(text ->
+                text.contains("перекрывает действительный MBR-раздел")));
+        assertTrue(mbr.diagnostics().stream().anyMatch(text ->
+                text.contains("CRC32 массива разделов GPT (Резервная копия)")));
+        assertFalse(mbr.diagnostics().stream().anyMatch(text ->
+                text.startsWith("Защитный MBR отсутствует")));
+        assertFalse(mbr.diagnostics().stream().anyMatch(text ->
+                text.contains("Записи разделов в основной и резервной копиях GPT различаются")));
+        assertTrue(new io.github.delokoseni.service.diagnostics.DiagnosticService()
+                .classify("Physical disk 2", mbr.diagnostics()).stream()
+                .filter(finding -> finding.message().contains("GPT"))
+                .allMatch(finding -> finding.severity()
+                        == io.github.delokoseni.service.diagnostics.DiagnosticSeverity.WARNING));
+
+        byte[] hybrid = validGpt(128);
+        putMbrEntry(hybrid, 462, 0x07, 80, 10);
+        PartitionTableAnalysis hybridResult = new PartitionTableAnalysisService().analyze(reader(hybrid));
+        assertEquals(io.github.delokoseni.model.PartitionStyle.HYBRID, hybridResult.style());
+        assertTrue(hybridResult.partitions().isEmpty());
+        assertTrue(hybridResult.diagnostics().stream().anyMatch(text -> text.contains("гибридная разметка")));
+
+        byte[] ambiguous = validGpt(128);
+        putMbrEntry(ambiguous, 446, 0x07, 40, 20);
+        PartitionTableAnalysis ambiguousResult = new PartitionTableAnalysisService().analyze(reader(ambiguous));
+        assertEquals(io.github.delokoseni.model.PartitionStyle.AMBIGUOUS, ambiguousResult.style());
+        assertTrue(ambiguousResult.partitions().isEmpty());
+
+        byte[] bothInvalid = validGpt(128);
+        bothInvalid[2 * SECTOR + 64] ^= 0x01;
+        bothInvalid[254 * SECTOR + 64] ^= 0x01;
+        PartitionTableAnalysis invalidResult = new PartitionTableAnalysisService().analyze(reader(bothInvalid));
+        assertEquals(io.github.delokoseni.model.PartitionStyle.RAW, invalidResult.style());
+        assertTrue(invalidResult.partitions().isEmpty());
+    }
+
+    private static void putMbrEntry(byte[] disk, int offset, int type, long start, long count) {
+        disk[offset + 4] = (byte) type;
+        put32(disk, offset + 8, (int) start);
+        put32(disk, offset + 12, (int) count);
     }
 
     private static SyntheticDiskReader reader(byte[] bytes) {

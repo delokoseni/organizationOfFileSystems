@@ -18,10 +18,10 @@ public record VolumeInfo(
         fileSystem = Objects.requireNonNullElse(fileSystem, "");
         label = Objects.requireNonNullElse(label, "");
         if (capacityBytes < 0 || availableBytes < 0 || clusterSizeBytes < 0) {
-            throw new IllegalArgumentException("Volume sizes and capacities cannot be negative");
+            throw new IllegalArgumentException("Размеры и ёмкости тома не могут быть отрицательными.");
         }
         if (availableBytes > capacityBytes) {
-            throw new IllegalArgumentException("Available volume capacity cannot exceed total capacity");
+            throw new IllegalArgumentException("Доступная ёмкость тома не может превышать общую ёмкость.");
         }
     }
 }

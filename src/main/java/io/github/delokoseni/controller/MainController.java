@@ -1,20 +1,25 @@
 package io.github.delokoseni.controller;
 
-import io.github.delokoseni.model.DeviceIdentification;
 import io.github.delokoseni.model.DiskInfo;
 import io.github.delokoseni.model.NtfsVolumeData;
 import io.github.delokoseni.model.VolumeInspection;
 import io.github.delokoseni.service.diagnostics.DiagnosticFinding;
+import io.github.delokoseni.service.diagnostics.DiagnosticCopyService;
+import io.github.delokoseni.service.diagnostics.DiagnosticSelectionService;
 import io.github.delokoseni.service.diagnostics.DiagnosticService;
+import io.github.delokoseni.service.diagnostics.DiagnosticTextFormatter;
 import io.github.delokoseni.service.disk.DiskAnalysis;
 import io.github.delokoseni.service.disk.DiskInventory;
 import io.github.delokoseni.service.disk.DiskInventoryService;
 import io.github.delokoseni.service.disk.RawDiskAccessStatus;
+import io.github.delokoseni.service.ntfs.NtfsFileRecordSegmentSize;
 import io.github.delokoseni.service.parser.PartitionRecord;
-import io.github.delokoseni.service.volume.ExternalVolumeAnalysis;
-import io.github.delokoseni.service.volume.ExternalVolumeCandidate;
+import io.github.delokoseni.service.volume.VolumeAnalysis;
+import io.github.delokoseni.service.volume.VolumeAnalysisCandidate;
+import io.github.delokoseni.service.volume.NtfsAnalysisReadiness;
 import io.github.delokoseni.service.volume.WindowsVolumeService;
 import io.github.delokoseni.util.CapacityFormatter;
+import io.github.delokoseni.util.UiMessages;
 import javafx.concurrent.Task;
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
@@ -33,6 +38,8 @@ import javafx.scene.control.Tab;
 import javafx.scene.control.TabPane;
 import javafx.scene.control.TextArea;
 import javafx.scene.control.Tooltip;
+import javafx.scene.input.Clipboard;
+import javafx.scene.input.ClipboardContent;
 import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
@@ -43,15 +50,17 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.HashSet;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.Set;
 
 public final class MainController {
     private final DiskInventoryService inventoryService = new DiskInventoryService();
     private final WindowsVolumeService volumeService = new WindowsVolumeService();
-    private DiskInventory inventory = new DiskInventory(
-            List.of(), List.of(), List.of(), java.util.Optional.empty(), "",
-            new DeviceIdentification(DeviceIdentification.Status.TARGET_VOLUME_NOT_FOUND,
-                    java.util.Optional.empty(), "D: has not been identified."));
+    private final DiagnosticTextFormatter diagnosticTextFormatter = new DiagnosticTextFormatter();
+    private final DiagnosticSelectionService diagnosticSelectionService = new DiagnosticSelectionService();
+    private DiskInventory inventory = new DiskInventory(List.of(), List.of(), List.of());
+    private final Map<String, List<DiagnosticFinding>> volumeDiagnostics = new HashMap<>();
     private Label diskInformation;
     private Label inventoryStatus;
     private ListView<DiskAnalysis> disks;
@@ -61,23 +70,28 @@ public final class MainController {
     private TextArea volumeInformation;
     private TableView<DiagnosticFinding> diagnosticTable;
     private Button refreshButton;
-    private Button analyzeExternalButton;
+    private Button analyzeSelectedVolumeButton;
+    private Button copyAllDiagnosticsButton;
+    private Label ntfsAvailability;
     private ProgressIndicator progress;
     private TextArea ntfsInformation;
     private final Set<Integer> diskInspectionsInProgress = new HashSet<>();
-    private ExternalVolumeCandidate confirmedCandidate;
+    private VolumeAnalysisCandidate confirmedCandidate;
+    private boolean ntfsOperationInProgress;
+    private String ntfsFailureForSelection = "";
+    private String ntfsFailedVolumeGuid = "";
 
     public Parent createView() {
         BorderPane root = new BorderPane();
         root.setPadding(new Insets(16));
         root.setStyle("-fx-background-color: #f3f6fa; -fx-font-family: 'Segoe UI';");
 
-        Label title = new Label("File System Organization");
+        Label title = new Label(UiMessages.text("application.title"));
         title.setStyle("-fx-font-size: 23px; -fx-font-weight: bold; -fx-text-fill: #14213d;");
-        Label readOnly = new Label("READ-ONLY");
+        Label readOnly = new Label(UiMessages.text("application.readOnly"));
         readOnly.setStyle("-fx-background-color: #e6f4ea; -fx-text-fill: #176b37; "
                 + "-fx-font-weight: bold; -fx-padding: 7 12; -fx-background-radius: 14;");
-        refreshButton = new Button("Refresh disks and volumes");
+        refreshButton = new Button(UiMessages.text("application.refresh"));
         refreshButton.setOnAction(event -> refreshInventory());
         progress = new ProgressIndicator();
         progress.setMaxSize(24, 24);
@@ -88,7 +102,7 @@ public final class MainController {
         root.setTop(header);
 
         disks = new ListView<>();
-        disks.setPlaceholder(new Label("Refresh to enumerate disks"));
+        disks.setPlaceholder(new Label(UiMessages.text("empty.disks")));
         disks.setCellFactory(view -> new ListCell<>() {
             @Override
             protected void updateItem(DiskAnalysis item, boolean empty) {
@@ -97,21 +111,13 @@ public final class MainController {
                     setText(null);
                 } else {
                     DiskInfo disk = item.disk();
-                    String model = disk.model().isBlank() ? "Model unavailable" : disk.model();
-                    boolean preferredTestDevice = inventory.adataCandidate().filter(candidate ->
-                            candidate.physicalDiskNumber() == disk.diskNumber()).isPresent()
-                            || inventory.adataIdentification().disk()
-                            .filter(identified -> identified.diskNumber() == disk.diskNumber()).isPresent();
-                    String category = item.volumes().stream().anyMatch(MainController::isSystemVolume)
-                            ? "Windows system disk"
-                            : preferredTestDevice
-                            ? "ADATA SE760 test device"
-                            : disk.removable() ? "Removable media" : "Physical disk";
-                    setText("Disk " + disk.diskNumber() + "  |  " + model + "\n"
+                    String model = disk.model().isBlank() ? "Модель недоступна" : disk.model();
+                    String category = disk.removable() ? "Съёмный носитель" : "Физический диск";
+                    setText("Диск " + disk.diskNumber() + "  |  " + model + "\n"
                             + capacityText(disk.capacityBytes()) + "  |  "
-                            + disk.partitionStyle() + "  |  " + category + "\n"
+                            + disk.partitionStyle().displayName() + "  |  " + category + "\n"
                             + item.accessStatus().displayName());
-                    if ("ADATA SE760 test device".equals(category)) {
+                    if (disk.removable()) {
                         setStyle("-fx-background-color: #e6f4ea; -fx-font-weight: bold;");
                     } else {
                         setStyle("");
@@ -119,44 +125,38 @@ public final class MainController {
                 }
             }
         });
-        VBox diskPanel = new VBox(10, sectionTitle("Physical disks"), disks);
+        VBox diskPanel = new VBox(10, sectionTitle(UiMessages.text("section.physicalDisks")), disks);
         diskPanel.setPadding(new Insets(12));
         diskPanel.setPrefWidth(260);
         diskPanel.setStyle(panelStyle());
         VBox.setVgrow(disks, Priority.ALWAYS);
         root.setLeft(diskPanel);
 
-        inventoryStatus = new Label("Refresh to enumerate physical disk interfaces and volumes independently.");
+        inventoryStatus = new Label("Обновите список, чтобы отдельно обнаружить физические диски и тома.");
         inventoryStatus.setWrapText(true);
         inventoryStatus.setStyle("-fx-text-fill: #475467; -fx-background-color: white; "
                 + "-fx-padding: 10; -fx-background-radius: 6;");
-        diskInformation = new Label("No disk selected.");
+        diskInformation = new Label(UiMessages.text("status.noDisk"));
         diskInformation.setWrapText(true);
         diskInformation.setStyle("-fx-font-family: 'Consolas'; -fx-background-color: white; "
                 + "-fx-padding: 10; -fx-background-radius: 6;");
 
         partitions = createPartitionTable();
-        selectedPartitionInformation = new TextArea("Select a partition to view its structure.");
+        selectedPartitionInformation = new TextArea(UiMessages.text("status.noPartition"));
         selectedPartitionInformation.setEditable(false);
         selectedPartitionInformation.setWrapText(true);
         selectedPartitionInformation.setStyle("-fx-font-family: 'Consolas';");
         volumes = createVolumeList();
-        volumeInformation = new TextArea("No volume selected.");
+        volumeInformation = new TextArea(UiMessages.text("status.noVolume"));
         volumeInformation.setEditable(false);
         volumeInformation.setWrapText(true);
         volumeInformation.setStyle("-fx-font-family: 'Consolas';");
         diagnosticTable = createDiagnosticTable();
-        diagnosticTable.getItems().add(new DiagnosticFinding(
-                io.github.delokoseni.service.diagnostics.DiagnosticSeverity.INFORMATION,
-                "ADATA SE760 (D:)",
-                "NTFS analysis has not been confirmed or run. Use the read-only analysis action "
-                        + "to verify D: and explicitly confirm before any NTFS-specific query."));
-
-        analyzeExternalButton = new Button("Analyze ADATA SE760 (D:)");
-        analyzeExternalButton.setDisable(true);
-        analyzeExternalButton.setTooltip(new Tooltip("Refresh disks and volumes to verify D: before enabling."));
-        analyzeExternalButton.setOnAction(event -> verifyThenAnalyze(analyzeExternalButton));
-        VBox diskTab = new VBox(10, diskInformation, sectionTitle("Partition table"), partitions);
+        analyzeSelectedVolumeButton = new Button(UiMessages.text("application.selectVolume"));
+        analyzeSelectedVolumeButton.setDisable(true);
+        analyzeSelectedVolumeButton.setTooltip(new Tooltip("Сначала выберите том в списке."));
+        analyzeSelectedVolumeButton.setOnAction(event -> verifyThenAnalyze(analyzeSelectedVolumeButton));
+        VBox diskTab = new VBox(10, diskInformation, sectionTitle(UiMessages.text("section.partitionTable")), partitions);
         diskTab.setPadding(new Insets(12));
         VBox.setVgrow(partitions, Priority.ALWAYS);
         VBox selectedTab = new VBox(8, selectedPartitionInformation);
@@ -166,26 +166,30 @@ public final class MainController {
         fileSystemTab.setPadding(new Insets(12));
         VBox.setVgrow(volumes, Priority.ALWAYS);
         VBox.setVgrow(volumeInformation, Priority.ALWAYS);
-        VBox diagnosticsTab = new VBox(8, new Label("Findings are diagnostic only; no repair or fix actions exist."),
-                diagnosticTable);
+        copyAllDiagnosticsButton = new Button("Копировать все");
+        copyAllDiagnosticsButton.setOnAction(event -> copyAllDiagnostics());
+        VBox diagnosticsTab = new VBox(8,
+                new Label("Диагностика не изменяет данные; функции исправления отсутствуют."),
+                copyAllDiagnosticsButton, diagnosticTable);
         diagnosticsTab.setPadding(new Insets(12));
         VBox.setVgrow(diagnosticTable, Priority.ALWAYS);
-        ntfsInformation = new TextArea("NTFS analysis has not been run. Select "
-                + "\"Analyze ADATA SE760 (D:)\" above to re-verify the device and volume; "
-                + "Windows will be queried for NTFS-only data only after you confirm.");
+        ntfsInformation = new TextArea("Выберите том и нажмите «Анализировать выбранный том». "
+                + "NTFS-данные запрашиваются только после явного подтверждения.");
         ntfsInformation.setEditable(false);
         ntfsInformation.setWrapText(true);
         ntfsInformation.setStyle("-fx-font-family: 'Consolas';");
-        VBox ntfsTab = new VBox(8, analyzeExternalButton, ntfsInformation);
+        ntfsAvailability = new Label("Выберите доступный том NTFS.");
+        ntfsAvailability.setWrapText(true);
+        VBox ntfsTab = new VBox(8, analyzeSelectedVolumeButton, ntfsAvailability, ntfsInformation);
         ntfsTab.setPadding(new Insets(12));
         VBox.setVgrow(ntfsInformation, Priority.ALWAYS);
 
         TabPane tabs = new TabPane(
-                tab("Disk and partition table", diskTab),
-                tab("Selected partition", selectedTab),
-                tab("Filesystem", fileSystemTab),
-                tab("NTFS and MFT", ntfsTab),
-                tab("Validation and diagnostics", diagnosticsTab));
+                tab(UiMessages.text("tab.disks"), diskTab),
+                tab(UiMessages.text("tab.partition"), selectedTab),
+                tab(UiMessages.text("tab.filesystem"), fileSystemTab),
+                tab(UiMessages.text("tab.ntfs"), ntfsTab),
+                tab(UiMessages.text("tab.diagnostics"), diagnosticsTab));
         VBox content = new VBox(10, inventoryStatus, tabs);
         content.setPadding(new Insets(0, 0, 0, 14));
         VBox.setVgrow(tabs, Priority.ALWAYS);
@@ -195,19 +199,37 @@ public final class MainController {
                 showDisk(selected));
         partitions.getSelectionModel().selectedItemProperty().addListener((observable, oldValue, selected) -> {
             selectedPartitionInformation.setText(selected == null
-                    ? "Select a partition to view its structure." : selected.details());
+                    ? UiMessages.text("status.noPartition") : selected.details());
         });
         volumes.getSelectionModel().selectedItemProperty().addListener((observable, oldValue, selected) -> {
-            volumeInformation.setText(selected == null ? "No volume selected." : describeVolume(selected));
+            volumeInformation.setText(selected == null ? UiMessages.text("status.noVolume") : describeVolume(selected));
+            confirmedCandidate = null;
+            ntfsFailureForSelection = "";
+            ntfsFailedVolumeGuid = "";
+            updateNtfsAction(selected);
+            refreshDiagnosticTable();
         });
         return root;
     }
 
     private void refreshInventory() {
         refreshButton.setDisable(true);
-        analyzeExternalButton.setDisable(true);
+        analyzeSelectedVolumeButton.setDisable(true);
+        confirmedCandidate = null;
+        ntfsFailureForSelection = "";
+        ntfsFailedVolumeGuid = "";
+        volumeDiagnostics.clear();
+        inventory = new DiskInventory(List.of(), List.of(), List.of());
+        disks.getItems().clear();
+        volumes.getItems().clear();
+        diagnosticTable.getItems().clear();
+        ntfsAvailability.setText("Обновление инвентаризации; анализ тома временно недоступен.");
+        disks.setDisable(true);
+        volumes.setDisable(true);
+        volumes.getSelectionModel().clearSelection();
+        disks.getSelectionModel().clearSelection();
         progress.setVisible(true);
-        inventoryStatus.setText("Enumerating volumes and inspecting mapped disks in a background task...");
+        inventoryStatus.setText("Обнаружение томов и проверка связанных дисков...");
         Task<DiskInventory> task = new Task<>() {
             @Override
             protected DiskInventory call() throws Exception {
@@ -217,38 +239,38 @@ public final class MainController {
         task.setOnSucceeded(event -> {
             inventory = task.getValue();
             confirmedCandidate = null;
+            ntfsFailureForSelection = "";
+            ntfsFailedVolumeGuid = "";
             disks.getSelectionModel().clearSelection();
             disks.getItems().setAll(inventory.disks());
+            volumes.getSelectionModel().clearSelection();
             volumes.getItems().setAll(inventory.volumes());
-            diagnosticTable.getItems().setAll(combineDiagnostics(inventory));
-            analyzeExternalButton.setDisable(inventory.adataCandidate().isEmpty());
-            analyzeExternalButton.setTooltip(new Tooltip(inventory.adataCandidate().isPresent()
-                    ? "D: is mapped to " + inventory.adataCandidate().orElseThrow().model()
-                    + " on physical disk " + inventory.adataCandidate().orElseThrow().physicalDiskNumber()
-                    + ". The workflow performs fresh checks and still requires confirmation."
-                    : inventory.adataEligibilityMessage()));
-            inventoryStatus.setText("Discovered " + inventory.disks().size() + " physical disks and "
-                    + inventory.volumes().size() + " volumes independently. Raw analysis runs only for a "
-                    + "selected disk; access failures do not remove it. "
-                    + (inventory.adataCandidate().isPresent()
-                    ? "ADATA D: is verified; explicit confirmation is still required."
-                    : inventory.adataIdentification().status() == DeviceIdentification.Status.IDENTIFIED
-                    ? "ADATA SE760 was identified from its PnP model and D: volume mapping, but raw read "
-                    + "verification is unavailable: " + inventory.adataEligibilityMessage()
-                    : "ADATA action disabled: " + inventory.adataEligibilityMessage()));
+            refreshDiagnosticTable();
+            updateNtfsAction(null);
+            disks.setDisable(false);
+            volumes.setDisable(false);
+            analyzeSelectedVolumeButton.setTooltip(new Tooltip("Выберите том для анализа."));
+            inventoryStatus.setText("Обнаружено физических дисков: " + inventory.disks().size()
+                    + "; томов: " + inventory.volumes().size()
+                    + ". Анализ диска выполняется только после его выбора; недоступные устройства остаются в списке.");
             refreshButton.setDisable(false);
             progress.setVisible(false);
             if (!disks.getItems().isEmpty()) {
                 disks.getSelectionModel().clearSelection();
-                diskInformation.setText("Select any discovered physical disk to request its read-only "
-                        + "partition analysis. No disk is selected automatically.");
+                diskInformation.setText("Выберите физический диск для анализа разделов только для чтения. "
+                        + "Автоматический выбор не выполняется.");
             } else {
                 showDisk(null);
             }
         });
         task.setOnFailed(event -> {
-            inventoryStatus.setText("Inventory refresh failed: " + errorText(task.getException()));
-            analyzeExternalButton.setDisable(true);
+            inventoryStatus.setText("Не удалось обновить список устройств: " + errorText(task.getException()));
+            updateNtfsAction(volumes.getSelectionModel().getSelectedItem());
+            ntfsAvailability.setText("Анализ недоступен: не удалось обновить список томов. "
+                    + errorText(task.getException()));
+            analyzeSelectedVolumeButton.setTooltip(new Tooltip(ntfsAvailability.getText()));
+            disks.setDisable(false);
+            volumes.setDisable(false);
             refreshButton.setDisable(false);
             progress.setVisible(false);
         });
@@ -257,29 +279,30 @@ public final class MainController {
 
     private void showDisk(DiskAnalysis analysis) {
         if (analysis == null) {
-            diskInformation.setText("No disk selected.");
+            diskInformation.setText(UiMessages.text("status.noDisk"));
             partitions.getItems().clear();
-            selectedPartitionInformation.setText("Select a partition to view its structure.");
+            selectedPartitionInformation.setText(UiMessages.text("status.noPartition"));
             return;
         }
-        selectedPartitionInformation.setText("Select a partition to view its structure.");
+        selectedPartitionInformation.setText(UiMessages.text("status.noPartition"));
         DiskInfo disk = analysis.disk();
-        diskInformation.setText("Physical disk " + disk.diskNumber() + "  |  "
-                + (disk.model().isBlank() ? "Model unavailable" : disk.model())
-                + "\nDevice: " + disk.devicePath()
-                + "\nVendor: " + fallback(disk.vendor()) + "   Serial: " + fallback(disk.serialNumber())
-                + "\nCapacity: " + capacityText(disk.capacityBytes())
-                + "\nLogical sector: " + (disk.logicalSectorSize() > 0
-                ? disk.logicalSectorSize() + " bytes" : "unavailable")
-                + "   Physical sector: "
-                + (disk.physicalSectorSize() > 0 ? disk.physicalSectorSize() + " bytes" : "unavailable")
-                + "\nPartition style: " + disk.partitionStyle()
-                + "\nRead access: " + analysis.accessStatus().displayName()
+        diskInformation.setText("Физический диск " + disk.diskNumber() + "  |  "
+                + (disk.model().isBlank() ? "Модель недоступна" : disk.model())
+                + "\nУстройство: " + disk.devicePath()
+                + "\nПроизводитель: " + fallback(disk.vendor())
+                + "   Серийный номер: " + fallback(disk.serialNumber())
+                + "\nЁмкость: " + capacityText(disk.capacityBytes())
+                + "\nЛогический сектор: " + (disk.logicalSectorSize() > 0
+                ? disk.logicalSectorSize() + " байт" : "недоступно")
+                + "   Физический сектор: "
+                + (disk.physicalSectorSize() > 0 ? disk.physicalSectorSize() + " байт" : "недоступно")
+                + "\nТип таблицы разделов: " + disk.partitionStyle().displayName()
+                + "\nДоступ на чтение: " + analysis.accessStatus().displayName()
                 + (analysis.accessMessage().isBlank() ? "" : "\n" + analysis.accessMessage())
-                + "\nAssociated volumes: " + (analysis.volumes().isEmpty() ? "none mapped"
+                + "\nСвязанные тома: " + (analysis.volumes().isEmpty() ? "не сопоставлены"
                 : analysis.volumes().stream().map(v -> v.volume().volumeGuidPath()
                 + (v.volume().mountPoints().isEmpty() ? "" : " (" + String.join(", ", v.volume().mountPoints()) + ")"))
-                .reduce((first, second) -> first + ", " + second).orElse("none mapped")));
+                .reduce((first, second) -> first + ", " + second).orElse("не сопоставлены")));
         partitions.getItems().setAll(partitionRows(analysis));
         if (analysis.accessStatus() == RawDiskAccessStatus.DISCOVERED
                 && diskInspectionsInProgress.add(disk.diskNumber())) {
@@ -288,12 +311,11 @@ public final class MainController {
     }
 
     private void inspectSelectedDisk(int diskNumber) {
-        inventoryStatus.setText("Reading selected physical disk " + diskNumber
-                + " with read-only access. Other discovered disks remain available.");
+        inventoryStatus.setText("Чтение выбранного физического диска " + diskNumber
+                + " только для чтения. Остальные диски остаются доступными.");
         progress.setVisible(true);
         refreshButton.setDisable(true);
         disks.setDisable(true);
-        analyzeExternalButton.setDisable(true);
         Task<DiskAnalysis> task = new Task<>() {
             @Override
             protected DiskAnalysis call() {
@@ -306,19 +328,17 @@ public final class MainController {
             List<DiskAnalysis> updated = inventory.disks().stream()
                     .map(disk -> disk.disk().diskNumber() == diskNumber ? result : disk)
                     .toList();
-            inventory = new DiskInventory(updated, inventory.volumes(), inventory.diagnostics(),
-                    inventory.adataCandidate(), inventory.adataEligibilityMessage(),
-                    inventory.adataIdentification());
+            inventory = new DiskInventory(updated, inventory.volumes(), inventory.diagnostics());
             disks.getItems().setAll(updated);
             DiskAnalysis current = updated.stream()
                     .filter(disk -> disk.disk().diskNumber() == diskNumber).findFirst().orElseThrow();
             disks.getSelectionModel().select(current);
-            diagnosticTable.getItems().setAll(combineDiagnostics(inventory));
+            refreshDiagnosticTable();
             progress.setVisible(false);
             refreshButton.setDisable(false);
             disks.setDisable(false);
-            analyzeExternalButton.setDisable(inventory.adataCandidate().isEmpty());
-            inventoryStatus.setText("Selected disk " + diskNumber + ": "
+            updateNtfsAction(volumes.getSelectionModel().getSelectedItem());
+            inventoryStatus.setText("Выбранный диск " + diskNumber + ": "
                     + current.accessStatus().displayName()
                     + (current.accessMessage().isBlank() ? "" : " — " + current.accessMessage()));
         });
@@ -327,23 +347,82 @@ public final class MainController {
             progress.setVisible(false);
             refreshButton.setDisable(false);
             disks.setDisable(false);
-            analyzeExternalButton.setDisable(inventory.adataCandidate().isEmpty());
-            inventoryStatus.setText("Selected disk inspection failed: " + errorText(task.getException()));
+            updateNtfsAction(volumes.getSelectionModel().getSelectedItem());
+            inventoryStatus.setText("Не удалось проверить выбранный диск: " + errorText(task.getException()));
         });
         startWorker(task, "physical-disk-" + diskNumber + "-inspection");
     }
 
-    private List<DiagnosticFinding> combineDiagnostics(DiskInventory inventory) {
-        List<DiagnosticFinding> findings = new ArrayList<>(inventory.diagnostics());
-        inventory.disks().forEach(disk -> findings.addAll(disk.diagnostics()));
-        if (confirmedCandidate == null) {
-            findings.add(new DiagnosticFinding(
+    private void refreshDiagnosticTable() {
+        VolumeInspection selected = volumes.getSelectionModel().getSelectedItem();
+        List<DiagnosticFinding> allVolumeFindings = volumeDiagnostics.values().stream()
+                .flatMap(List::stream).toList();
+        List<DiagnosticFinding> selectedFindings = selected == null ? List.of()
+                : volumeDiagnostics.getOrDefault(diagnosticKey(selected), List.of());
+        List<DiagnosticFinding> visible = diagnosticSelectionService.visibleFindings(
+                inventory, selected, selectedFindings, allVolumeFindings);
+        if (visible.isEmpty()) {
+            visible = List.of(new DiagnosticFinding(
                     io.github.delokoseni.service.diagnostics.DiagnosticSeverity.INFORMATION,
-                    "ADATA SE760 (D:)",
-                    "NTFS analysis has not been confirmed or run. Use the read-only analysis action "
-                            + "to verify D: and explicitly confirm before any NTFS-specific query."));
+                    selected == null ? "Диагностика" : selected.volume().volumeGuidPath(),
+                    selected == null ? "Диагностические сообщения отсутствуют."
+                            : "Для выбранного тома и связанного физического диска диагностические сообщения отсутствуют."));
         }
-        return findings;
+        diagnosticTable.getItems().setAll(visible);
+    }
+
+    private void storeVolumeDiagnostics(VolumeInspection volume, List<DiagnosticFinding> findings) {
+        volumeDiagnostics.put(diagnosticKey(volume), List.copyOf(findings));
+        refreshDiagnosticTable();
+    }
+
+    private static String diagnosticKey(VolumeInspection volume) {
+        return volume.volume().volumeGuidPath().toLowerCase(java.util.Locale.ROOT);
+    }
+
+    private void updateNtfsAction(VolumeInspection selected) {
+        NtfsAnalysisReadiness.Readiness readiness =
+                NtfsAnalysisReadiness.evaluate(selected, inventory.volumes());
+        String selectionKey = selected == null ? "" : selected.volume().volumeGuidPath();
+        boolean failedForSelection = !ntfsFailedVolumeGuid.isBlank()
+                && ntfsFailedVolumeGuid.equalsIgnoreCase(selectionKey);
+        ntfsAvailability.setText(failedForSelection
+                ? "Анализ недоступен: " + ntfsFailureForSelection
+                : readiness.explanation());
+        analyzeSelectedVolumeButton.setTooltip(new Tooltip(ntfsAvailability.getText()));
+        analyzeSelectedVolumeButton.setDisable(ntfsOperationInProgress
+                || !readiness.available() || failedForSelection);
+    }
+
+    private void copyAllDiagnostics() {
+        if (diagnosticTable.getItems().isEmpty()) {
+            inventoryStatus.setText("Нет диагностических сообщений для копирования.");
+            return;
+        }
+        VolumeInspection selected = volumes.getSelectionModel().getSelectedItem();
+        copyDiagnostics(clipboard -> new DiagnosticCopyService().copyAll(
+                diagnosticTable.getItems(), inventory, selected, clipboard));
+    }
+
+    private void copyOneDiagnostic(DiagnosticFinding finding) {
+        VolumeInspection selected = volumes.getSelectionModel().getSelectedItem();
+        copyDiagnostics(clipboard -> new DiagnosticCopyService().copyOne(
+                finding, inventory, selected, clipboard));
+    }
+
+    private void copyDiagnostics(java.util.function.Function<java.util.function.Consumer<String>, Boolean> copy) {
+        try {
+            boolean copied = copy.apply(text -> {
+                ClipboardContent content = new ClipboardContent();
+                content.putString(text);
+                if (!Clipboard.getSystemClipboard().setContent(content)) {
+                    throw new IllegalStateException("Системный буфер обмена отклонил текст.");
+                }
+            });
+            inventoryStatus.setText(copied ? "Диагностика скопирована." : "Нет диагностических сообщений для копирования.");
+        } catch (RuntimeException e) {
+            inventoryStatus.setText("Не удалось скопировать диагностику: " + errorText(e));
+        }
     }
 
     private List<PartitionRow> partitionRows(DiskAnalysis analysis) {
@@ -424,194 +503,230 @@ public final class MainController {
     }
 
     private static String partitionDetails(PartitionRecord p) {
-        return "Source: " + p.source()
-                + "\nPartition type: " + partitionType(p)
-                + "\nPartition GUID: " + fallback(p.typeGuid())
-                + "\nUnique partition GUID: " + fallback(p.uniqueGuid())
-                + "\nGPT attributes: 0x" + Long.toUnsignedString(p.attributes(), 16)
-                + "\nMBR partition type: " + String.format("0x%02X", p.mbrType())
-                + "\nBoot indicator: " + (p.typeGuid().isBlank()
-                ? (p.bootable() ? "bootable" : "not bootable") : "not applicable (GPT)")
-                + "\nStarting LBA: " + p.firstLba()
-                + "\nEnding LBA (inclusive): " + p.lastLbaInclusive()
-                + "\nStarting byte offset: " + p.startingOffsetBytes()
-                + "\nPartition size: " + p.lengthBytes()
-                + "\nName: " + fallback(p.name());
+        return "Источник: " + p.source()
+                + "\nТип раздела: " + partitionType(p)
+                + "\nGUID раздела: " + fallback(p.typeGuid())
+                + "\nУникальный GUID раздела: " + fallback(p.uniqueGuid())
+                + "\nАтрибуты GPT: 0x" + Long.toUnsignedString(p.attributes(), 16)
+                + "\nТип раздела MBR: " + String.format("0x%02X", p.mbrType())
+                + "\nПризнак загрузки: " + (p.typeGuid().isBlank()
+                ? (p.bootable() ? "загрузочный" : "незагрузочный") : "не применяется (GPT)")
+                + "\nНачальный LBA: " + p.firstLba()
+                + "\nКонечный LBA (включительно): " + p.lastLbaInclusive()
+                + "\nНачальное смещение в байтах: " + p.startingOffsetBytes()
+                + "\nРазмер раздела: " + p.lengthBytes() + " байт"
+                + "\nИмя: " + fallback(p.name());
     }
 
     private void verifyThenAnalyze(Button action) {
-        action.setDisable(true);
+        VolumeInspection selected = volumes.getSelectionModel().getSelectedItem();
+        if (selected == null) {
+            inventoryStatus.setText(UiMessages.text("status.chooseVolume"));
+            return;
+        }
+        ntfsOperationInProgress = true;
+        updateNtfsAction(selected);
+        volumes.setDisable(true);
         progress.setVisible(true);
-        inventoryStatus.setText("Verifying D: volume mapping, disk model, capacity, and partition boundaries...");
-        Task<ExternalVolumeCandidate> verification = new Task<>() {
+        inventoryStatus.setText("Повторная проверка выбранного тома, его физического диска и разделов...");
+        Task<VolumeAnalysisCandidate> verification = new Task<>() {
             @Override
-            protected ExternalVolumeCandidate call() throws Exception {
-                return volumeService.verifyExternalAdataD();
+            protected VolumeAnalysisCandidate call() throws Exception {
+                return volumeService.verifySelectedVolume(selected);
             }
         };
         verification.setOnSucceeded(event -> {
-            ExternalVolumeCandidate candidate = verification.getValue();
+            VolumeAnalysisCandidate candidate = verification.getValue();
             progress.setVisible(false);
+            volumes.setDisable(false);
+            VolumeInspection currentSelection = volumes.getSelectionModel().getSelectedItem();
+            if (currentSelection == null || !currentSelection.volume().volumeGuidPath()
+                    .equalsIgnoreCase(candidate.volumeInspection().volume().volumeGuidPath())) {
+                confirmedCandidate = null;
+                ntfsOperationInProgress = false;
+                inventoryStatus.setText("Выбор тома изменился во время проверки; анализ не запущен.");
+                updateNtfsAction(currentSelection);
+                return;
+            }
             if (confirmedCandidate != null && sameConfirmedCandidate(confirmedCandidate, candidate)) {
                 inspectConfirmedCandidate(candidate, action);
                 return;
             }
             confirmedCandidate = null;
+            ntfsOperationInProgress = false;
             Alert confirmation = new Alert(Alert.AlertType.CONFIRMATION);
-            confirmation.setTitle("Confirm read-only ADATA inspection");
-            confirmation.setHeaderText("Verified " + candidate.model()
-                    + " on physical disk " + candidate.physicalDiskNumber());
+            confirmation.setTitle("Подтверждение анализа только для чтения");
+            confirmation.setHeaderText("Проверен том на физическом диске " + candidate.physicalDiskNumber());
             confirmation.setContentText(describeCandidate(candidate)
-                    + "\n\nContinue with read-only filesystem/NTFS parameter inspection?");
-            confirmation.getButtonTypes().setAll(ButtonType.OK, ButtonType.CANCEL);
-            boolean confirmed = confirmation.showAndWait().orElse(ButtonType.CANCEL) == ButtonType.OK;
+                    + "\n\nПродолжить анализ файловой системы и параметров NTFS только для чтения?");
+            confirmation.getButtonTypes().setAll(new ButtonType("Продолжить"), new ButtonType("Отмена"));
+            ButtonType continueButton = confirmation.getButtonTypes().getFirst();
+            boolean confirmed = confirmation.showAndWait().orElse(ButtonType.CANCEL) == continueButton;
             if (confirmed) {
                 confirmedCandidate = candidate;
-                diagnosticTable.getItems().removeIf(finding ->
-                        finding.scope().equals("ADATA SE760 (D:)")
-                                && finding.severity()
-                                == io.github.delokoseni.service.diagnostics.DiagnosticSeverity.INFORMATION);
                 inspectConfirmedCandidate(candidate, action);
             } else {
-                inventoryStatus.setText("ADATA inspection cancelled; no NTFS query was issued.");
+                inventoryStatus.setText("Анализ отменён; запрос NTFS не выполнялся.");
                 confirmedCandidate = null;
-                diagnosticTable.getItems().removeIf(finding ->
-                        finding.scope().equals("ADATA SE760 (D:)")
-                                && finding.severity()
-                                == io.github.delokoseni.service.diagnostics.DiagnosticSeverity.INFORMATION);
-                diagnosticTable.getItems().add(new DiagnosticFinding(
+                storeVolumeDiagnostics(currentSelection, List.of(new DiagnosticFinding(
                         io.github.delokoseni.service.diagnostics.DiagnosticSeverity.INFORMATION,
-                        "ADATA SE760 (D:)", "Analysis was not confirmed; no NTFS query was issued."));
-                action.setDisable(false);
+                        currentSelection.volume().volumeGuidPath(),
+                        "Подтверждение не получено; запрос NTFS не выполнялся.")));
+                updateNtfsAction(currentSelection);
             }
         });
         verification.setOnFailed(event -> {
             confirmedCandidate = null;
-            inventoryStatus.setText("ADATA verification failed; no volume analysis was started: "
-                    + errorText(verification.getException()));
-            diagnosticTable.getItems().removeIf(finding ->
-                    finding.scope().equals("ADATA SE760 (D:)")
-                            && finding.severity()
-                            == io.github.delokoseni.service.diagnostics.DiagnosticSeverity.INFORMATION);
-            diagnosticTable.getItems().add(new DiagnosticFinding(
+            ntfsOperationInProgress = false;
+            volumes.setDisable(false);
+            String reason = errorText(verification.getException());
+            ntfsFailureForSelection = reason;
+            ntfsFailedVolumeGuid = selected.volume().volumeGuidPath();
+            inventoryStatus.setText("Не удалось проверить выбранный том; анализ не запущен: " + reason);
+            storeVolumeDiagnostics(selected, List.of(new DiagnosticFinding(
                     io.github.delokoseni.service.diagnostics.DiagnosticSeverity.ERROR,
-                    "ADATA SE760 (D:) verification", errorText(verification.getException())));
-            diagnosticTable.getItems().add(new DiagnosticFinding(
-                    io.github.delokoseni.service.diagnostics.DiagnosticSeverity.INFORMATION,
-                    "ADATA SE760 (D:)",
-                    "Analysis has not been confirmed or run. Reconnect/verify D: before trying again."));
-            action.setDisable(inventory.adataCandidate().isEmpty());
+                    selected.volume().volumeGuidPath() + " — проверка",
+                    errorText(verification.getException()))));
+            updateNtfsAction(volumes.getSelectionModel().getSelectedItem());
             progress.setVisible(false);
         });
-        startWorker(verification, "adata-device-verification");
+        startWorker(verification, "selected-volume-verification");
     }
 
-    private void inspectConfirmedCandidate(ExternalVolumeCandidate candidate, Button action) {
+    private void inspectConfirmedCandidate(VolumeAnalysisCandidate candidate, Button action) {
+        ntfsOperationInProgress = true;
+        updateNtfsAction(volumes.getSelectionModel().getSelectedItem());
         progress.setVisible(true);
-        inventoryStatus.setText("Revalidating D: and reading confirmed filesystem parameters...");
-        Task<ExternalVolumeAnalysis> analysis = new Task<>() {
+        inventoryStatus.setText("Повторная проверка тома и чтение подтверждённых параметров файловой системы...");
+        volumes.setDisable(true);
+        Task<VolumeAnalysis> analysis = new Task<>() {
             @Override
-            protected ExternalVolumeAnalysis call() throws Exception {
-                return volumeService.inspectVerifiedAdataD(candidate, true);
+            protected VolumeAnalysis call() throws Exception {
+                return volumeService.inspectVerifiedVolume(candidate, true);
             }
         };
         analysis.setOnSucceeded(event -> {
-            ExternalVolumeAnalysis result = analysis.getValue();
-            inventoryStatus.setText("Read-only analysis completed for " + result.candidate().model()
-                    + " on physical disk " + result.candidate().physicalDiskNumber() + ".");
-            action.setDisable(false);
+            VolumeAnalysis result = analysis.getValue();
+            inventoryStatus.setText("Анализ только для чтения завершён для тома "
+                    + result.candidate().volumeInspection().volume().volumeGuidPath() + ".");
+            ntfsOperationInProgress = false;
+            ntfsFailureForSelection = "";
+            ntfsFailedVolumeGuid = "";
+            updateNtfsAction(volumes.getSelectionModel().getSelectedItem());
+            volumes.setDisable(false);
             progress.setVisible(false);
-            diagnosticTable.getItems().addAll(new DiagnosticService().classify(
-                    "ADATA SE760 (D:)", result.diagnostics()));
+            storeVolumeDiagnostics(result.candidate().volumeInspection(),
+                    new DiagnosticService().classify(
+                            result.candidate().volumeInspection().volume().volumeGuidPath(),
+                            result.diagnostics()));
             showAnalysisResult(result);
         });
         analysis.setOnFailed(event -> {
-            inventoryStatus.setText("ADATA analysis stopped safely: " + errorText(analysis.getException()));
+            volumes.setDisable(false);
+            ntfsOperationInProgress = false;
+            String reason = errorText(analysis.getException());
+            ntfsFailureForSelection = reason;
+            ntfsFailedVolumeGuid = candidate.volumeInspection().volume().volumeGuidPath();
+            inventoryStatus.setText("Анализ безопасно остановлен: " + reason);
             DiagnosticFinding finding = new DiagnosticService().classify(
-                    "ADATA SE760 (D:) analysis", List.of(errorText(analysis.getException()))).getFirst();
-            diagnosticTable.getItems().add(finding);
-            action.setDisable(inventory.adataCandidate().isEmpty());
+                    candidate.volumeInspection().volume().volumeGuidPath(), List.of(errorText(analysis.getException())))
+                    .getFirst();
+            storeVolumeDiagnostics(candidate.volumeInspection(), List.of(finding));
+            updateNtfsAction(volumes.getSelectionModel().getSelectedItem());
             progress.setVisible(false);
         });
-        startWorker(analysis, "adata-volume-analysis");
+        startWorker(analysis, "selected-volume-analysis");
     }
 
-    private void showAnalysisResult(ExternalVolumeAnalysis result) {
+    private void showAnalysisResult(VolumeAnalysis result) {
         Alert report = new Alert(Alert.AlertType.INFORMATION);
-        report.setTitle("Read-only ADATA analysis");
-        report.setHeaderText("Verified " + result.candidate().model()
-                + " - disk " + result.candidate().physicalDiskNumber());
+        report.setTitle("Анализ только для чтения");
+        report.setHeaderText("Проверен том на физическом диске " + result.candidate().physicalDiskNumber());
         String text = describeCandidate(result.candidate());
         String fileSystem = result.candidate().volumeInspection().volume().fileSystem();
         if (result.ntfsData().isEmpty()) {
-            text += "\n\nNTFS-specific information is unavailable because the verified volume "
-                    + "filesystem is " + (fileSystem.isBlank() ? "unknown" : fileSystem) + ".";
+            text += "\n\nДанные NTFS недоступны, поскольку файловая система выбранного тома — "
+                    + (fileSystem.isBlank() ? "неизвестная" : fileSystem) + ".";
         }
         if (result.ntfsData().isPresent()) {
             NtfsVolumeData ntfs = result.ntfsData().orElseThrow();
             var metrics = result.ntfsMetrics().orElseThrow();
-            text += "\n\nNTFS volume serial: " + Long.toUnsignedString(ntfs.volumeSerialNumber())
-                    + "\nNumber of sectors: " + ntfs.numberOfSectors()
-                    + "\nTotal clusters: " + ntfs.totalClusters()
-                    + "\nFree clusters: " + ntfs.freeClusters()
-                    + "\nReserved clusters: " + ntfs.reservedClusters()
-                    + "\nBytes per sector / cluster: " + ntfs.bytesPerSector() + " / " + ntfs.bytesPerCluster()
-                    + "\nSectors per cluster: " + metrics.sectorsPerCluster()
-                    + "\nCluster capacity: " + CapacityFormatter.format(metrics.totalClusterCapacityBytes())
-                    + "\nUsed clusters (includes reserved): " + metrics.usedClusters()
-                    + "\nFree cluster capacity: " + CapacityFormatter.format(metrics.freeClusterCapacityBytes())
-                    + "\nMFT start LCN / volume offset: " + ntfs.mftStartLcn() + " / "
-                    + metrics.mftStartOffsetWithinVolume() + " bytes"
-                    + "\nMFT mirror LCN / volume offset: " + ntfs.mftMirrorStartLcn() + " / "
-                    + metrics.mftMirrorStartOffsetWithinVolume() + " bytes"
-                    + "\nMFT valid data length: " + ntfs.mftValidDataLength()
-                    + "\nMFT record size: " + metrics.mftRecordSizeBytes()
-                    + " bytes; clusters per record: " + ntfs.clustersPerFileRecordSegment()
-                    + "\nMFT zone LCN range: [" + ntfs.mftZoneStartLcn() + ", "
-                    + ntfs.mftZoneEndLcn() + "), size: " + CapacityFormatter.format(metrics.mftZoneSizeBytes())
-                    + "\nNTFS version: not provided by FSCTL_GET_NTFS_VOLUME_DATA";
+            text += "\n\nСерийный номер тома NTFS: " + Long.toUnsignedString(ntfs.volumeSerialNumber())
+                    + "\nКоличество секторов: " + ntfs.numberOfSectors()
+                    + "\nВсего кластеров: " + ntfs.totalClusters()
+                    + "\nСвободных кластеров: " + ntfs.freeClusters()
+                    + "\nЗарезервировано кластеров: " + ntfs.reservedClusters()
+                    + "\nБайт в секторе / кластере: " + ntfs.bytesPerSector() + " / " + ntfs.bytesPerCluster()
+                    + "\nСекторов в кластере: " + metrics.sectorsPerCluster()
+                    + "\nЁмкость кластеров: " + CapacityFormatter.format(metrics.totalClusterCapacityBytes())
+                    + "\nИспользовано кластеров (включая резерв): " + metrics.usedClusters()
+                    + "\nЁмкость свободных кластеров: " + CapacityFormatter.format(metrics.freeClusterCapacityBytes())
+                    + "\nНачало MFT (LCN / смещение в томе): " + ntfs.mftStartLcn() + " / "
+                    + metrics.mftStartOffsetWithinVolume() + " байт"
+                    + "\nЗеркало MFT (LCN / смещение в томе): " + ntfs.mftMirrorStartLcn() + " / "
+                    + metrics.mftMirrorStartOffsetWithinVolume() + " байт"
+                    + "\nДлина действительных данных MFT: " + ntfs.mftValidDataLength()
+                    + "\nРазмер записи MFT: " + metrics.mftRecordSizeBytes()
+                    + " байт (" + NtfsFileRecordSegmentSize.describeClustersPerRecord(
+                    metrics.mftRecordSizeBytes(), ntfs.bytesPerCluster()) + ")"
+                    + "; Windows ClustersPerFileRecordSegment: " + ntfs.clustersPerFileRecordSegment()
+                    + (ntfs.clustersPerFileRecordSegment() == 0
+                    && metrics.mftRecordSizeBytes() < ntfs.bytesPerCluster()
+                    ? " (запись меньше кластера; значение DWORD равно нулю)" : "")
+                    + (result.ntfsBootSector().isPresent()
+                    ? "; знаковое кодирование размера записи в BPB: "
+                    + result.ntfsBootSector().orElseThrow().fileRecordSizeEncoding() : "")
+                    + "\nДиапазон зоны MFT по LCN: [" + ntfs.mftZoneStartLcn() + ", "
+                    + ntfs.mftZoneEndLcn() + "), размер: " + CapacityFormatter.format(metrics.mftZoneSizeBytes())
+                    + "\nВерсия NTFS: FSCTL_GET_NTFS_VOLUME_DATA её не предоставляет";
         }
         if (!result.diagnostics().isEmpty()) {
-            text += "\n\nDiagnostics:\n" + String.join("\n", result.diagnostics());
+            text += "\n\nДиагностика:\n" + String.join("\n", result.diagnostics());
         }
         ntfsInformation.setText(text);
         report.setContentText(text);
         report.showAndWait();
     }
 
-    private static String describeCandidate(ExternalVolumeCandidate candidate) {
+    private static String describeCandidate(VolumeAnalysisCandidate candidate) {
         VolumeInspection inspection = candidate.volumeInspection();
         var fileSystemInfo = inspection.fileSystem();
         StringBuilder text = new StringBuilder()
-                .append("Drive letter: D:")
-                .append("\nVolume GUID: ").append(inspection.volume().volumeGuidPath())
-                .append("\nFilesystem: ").append(inspection.volume().fileSystem())
-                .append("\nVolume label: ").append(fallback(inspection.volume().label()))
-                .append("\nVolume serial: ").append(inspection.fileSystem().isPresent()
+                .append("Точки подключения: ").append(inspection.volume().mountPoints().isEmpty()
+                        ? "отсутствуют" : String.join(", ", inspection.volume().mountPoints()))
+                .append("\nGUID тома: ").append(inspection.volume().volumeGuidPath())
+                .append("\nФайловая система: ").append(inspection.volume().fileSystem())
+                .append("\nМетка тома: ").append(fallback(inspection.volume().label()))
+                .append("\nСерийный номер тома: ").append(inspection.fileSystem().isPresent()
                         ? Long.toUnsignedString(inspection.fileSystem().orElseThrow().volumeSerialNumber())
-                        : "unavailable")
-                .append("\nVolume capacity: ").append(fileSystemInfo.isPresent()
-                        ? CapacityFormatter.format(fileSystemInfo.orElseThrow().totalBytes()) : "unavailable")
-                .append("\nAvailable free space: ").append(fileSystemInfo.isPresent()
-                        ? CapacityFormatter.format(fileSystemInfo.orElseThrow().availableBytes()) : "unavailable")
-                .append("\nPhysical disk: ").append(candidate.physicalDiskNumber())
-                .append("\nDevice serial: ").append(candidate.serialNumber().isBlank()
-                        ? "unavailable" : candidate.serialNumber())
-                .append("\nCapacity: ").append(CapacityFormatter.format(candidate.diskCapacityBytes()))
-                .append("\nLogical disk sector: ").append(candidate.logicalSectorSize()).append(" bytes")
-                .append("\nPhysical disk sector: ")
+                        : "недоступно")
+                .append("\nЁмкость тома: ").append(fileSystemInfo.isPresent()
+                        ? CapacityFormatter.format(fileSystemInfo.orElseThrow().totalBytes()) : "недоступно")
+                .append("\nСвободно: ").append(fileSystemInfo.isPresent()
+                        ? CapacityFormatter.format(fileSystemInfo.orElseThrow().availableBytes()) : "недоступно")
+                .append("\nФизический диск: ").append(candidate.physicalDiskNumber())
+                .append("\nМодель устройства: ").append(candidate.model().isBlank()
+                        ? "недоступна" : candidate.model())
+                .append("\nСерийный номер устройства: ").append(candidate.serialNumber().isBlank()
+                        ? "недоступен" : candidate.serialNumber())
+                .append("\nЁмкость диска: ").append(CapacityFormatter.format(candidate.diskCapacityBytes()))
+                .append("\nЛогический сектор: ").append(candidate.logicalSectorSize()).append(" байт")
+                .append("\nФизический сектор: ")
                 .append(candidate.physicalSectorSize().isPresent()
-                        ? candidate.physicalSectorSize().getAsInt() + " bytes" : "unavailable");
+                        ? candidate.physicalSectorSize().getAsInt() + " байт" : "недоступен");
         for (var partition : candidate.partitions()) {
-            text.append("\nPartition ").append(partition.partitionNumber())
-                    .append(": offset ").append(partition.startingOffsetBytes())
-                    .append(" bytes, length ").append(partition.lengthBytes()).append(" bytes");
+            text.append("\nРаздел ").append(partition.partitionNumber())
+                    .append(": смещение ").append(partition.startingOffsetBytes())
+                    .append(" байт, размер ").append(partition.lengthBytes()).append(" байт");
+        }
+        if (!candidate.diagnostics().isEmpty()) {
+            text.append("\n\nПримечания:\n").append(String.join("\n", candidate.diagnostics()));
         }
         return text.toString();
     }
 
     private static boolean sameConfirmedCandidate(
-            ExternalVolumeCandidate first, ExternalVolumeCandidate second) {
+            VolumeAnalysisCandidate first, VolumeAnalysisCandidate second) {
         return first.physicalDiskNumber() == second.physicalDiskNumber()
                 && first.diskCapacityBytes() == second.diskCapacityBytes()
                 && first.logicalSectorSize() == second.logicalSectorSize()
@@ -633,45 +748,47 @@ public final class MainController {
 
     private static String describeVolume(VolumeInspection inspection) {
         StringBuilder text = new StringBuilder()
-                .append("Volume GUID: ").append(inspection.volume().volumeGuidPath())
-                .append("\nMount points: ").append(String.join(", ", inspection.volume().mountPoints()))
-                .append("\nFilesystem: ").append(inspection.volume().fileSystem())
-                .append("\nLabel: ").append(inspection.volume().label());
+                .append("GUID тома: ").append(inspection.volume().volumeGuidPath())
+                .append("\nТочки подключения: ").append(inspection.volume().mountPoints().isEmpty()
+                        ? "отсутствуют" : String.join(", ", inspection.volume().mountPoints()))
+                .append("\nФайловая система: ").append(inspection.volume().fileSystem())
+                .append("\nМетка тома: ").append(inspection.volume().label());
         if (inspection.fileSystem().isPresent()) {
             var info = inspection.fileSystem().orElseThrow();
-            text.append("\nVolume serial: ").append(Long.toUnsignedString(info.volumeSerialNumber()))
-                    .append("\nMaximum component name length: ").append(info.maximumComponentNameLength())
-                    .append("\nCapabilities: ").append(String.join(", ", info.capabilityNames()))
-                    .append("\nTotal / free / available: ").append(CapacityFormatter.format(info.totalBytes()))
+            text.append("\nСерийный номер тома: ").append(Long.toUnsignedString(info.volumeSerialNumber()))
+                    .append("\nМаксимальная длина имени компонента: ").append(info.maximumComponentNameLength())
+                    .append("\nВозможности: ").append(String.join(", ", info.capabilityNames()))
+                    .append("\nВсего / свободно / доступно: ").append(CapacityFormatter.format(info.totalBytes()))
                     .append(" / ").append(CapacityFormatter.format(info.freeBytes()))
                     .append(" / ").append(CapacityFormatter.format(info.availableBytes()))
-                    .append("\nFilesystem sector size: ").append(info.bytesPerSector()).append(" bytes")
-                    .append("\nSectors per cluster: ").append(info.sectorsPerCluster())
-                    .append("\nFilesystem cluster size: ").append(CapacityFormatter.format(info.clusterSizeBytes()));
+                    .append("\nРазмер сектора файловой системы: ").append(info.bytesPerSector()).append(" байт")
+                    .append("\nСекторов в кластере: ").append(info.sectorsPerCluster())
+                    .append("\nРазмер кластера файловой системы: ")
+                    .append(CapacityFormatter.format(info.clusterSizeBytes()));
         }
         for (var extent : inspection.diskExtents()) {
-            text.append("\nExtent: physical disk ").append(extent.diskNumber())
-                    .append(", offset ").append(extent.startingOffsetBytes())
-                    .append(", length ").append(extent.extentLengthBytes()).append(" bytes");
+            text.append("\nОбласть: физический диск ").append(extent.diskNumber())
+                    .append(", смещение ").append(extent.startingOffsetBytes())
+                    .append(", размер ").append(extent.extentLengthBytes()).append(" байт");
         }
         if (!inspection.diagnostics().isEmpty()) {
-            text.append("\n\nDiagnostics:\n").append(String.join("\n", inspection.diagnostics()));
+            text.append("\n\nДиагностика:\n").append(String.join("\n", inspection.diagnostics()));
         }
-        text.append("\n\nCapability flags indicate filesystem support, not that every file uses a feature.");
+        text.append("\n\nФлаги возможностей обозначают поддержку файловой системы, а не использование каждой функции файлами.");
         return text.toString();
     }
 
     private static TableView<PartitionRow> createPartitionTable() {
         TableView<PartitionRow> table = new TableView<>();
-        table.setPlaceholder(new Label("No partition data available for this disk"));
-        addPartitionColumn(table, "Number", PartitionRow::number, 65);
-        addPartitionColumn(table, "Volume / mount", PartitionRow::mount, 120);
-        addPartitionColumn(table, "Filesystem", PartitionRow::fileSystem, 100);
-        addPartitionColumn(table, "Type", PartitionRow::type, 180);
-        addPartitionColumn(table, "Start offset (bytes)", PartitionRow::startOffset, 140);
-        addPartitionColumn(table, "Size", PartitionRow::size, 100);
-        addPartitionColumn(table, "Starting LBA", PartitionRow::firstLba, 100);
-        addPartitionColumn(table, "Ending LBA", PartitionRow::lastLba, 100);
+        table.setPlaceholder(new Label(UiMessages.text("empty.partition")));
+        addPartitionColumn(table, "Номер", PartitionRow::number, 65);
+        addPartitionColumn(table, "Том / точка подключения", PartitionRow::mount, 150);
+        addPartitionColumn(table, "Файловая система", PartitionRow::fileSystem, 120);
+        addPartitionColumn(table, "Тип", PartitionRow::type, 180);
+        addPartitionColumn(table, "Смещение (байт)", PartitionRow::startOffset, 140);
+        addPartitionColumn(table, "Размер", PartitionRow::size, 100);
+        addPartitionColumn(table, "Начальный LBA", PartitionRow::firstLba, 100);
+        addPartitionColumn(table, "Конечный LBA", PartitionRow::lastLba, 100);
         table.getSelectionModel().selectFirst();
         return table;
     }
@@ -689,7 +806,7 @@ public final class MainController {
 
     private ListView<VolumeInspection> createVolumeList() {
         ListView<VolumeInspection> list = new ListView<>();
-        list.setPlaceholder(new Label("Refresh to enumerate volumes"));
+        list.setPlaceholder(new Label(UiMessages.text("empty.volumes")));
         list.setCellFactory(view -> new ListCell<>() {
             @Override
             protected void updateItem(VolumeInspection item, boolean empty) {
@@ -698,7 +815,7 @@ public final class MainController {
                     setText(null);
                 } else {
                     String mounts = item.volume().mountPoints().isEmpty()
-                            ? "(no mount point)" : String.join(", ", item.volume().mountPoints());
+                            ? "(без точки подключения)" : String.join(", ", item.volume().mountPoints());
                     setText(mounts + "  |  " + item.volume().fileSystem() + "  |  "
                             + item.volume().volumeGuidPath());
                 }
@@ -707,18 +824,37 @@ public final class MainController {
         return list;
     }
 
-    private static TableView<DiagnosticFinding> createDiagnosticTable() {
+    private TableView<DiagnosticFinding> createDiagnosticTable() {
         TableView<DiagnosticFinding> table = new TableView<>();
-        table.setPlaceholder(new Label("Refresh to run validation diagnostics"));
+        table.setPlaceholder(new Label(UiMessages.text("empty.diagnostics")));
         TableColumn<DiagnosticFinding, String> severity = diagnosticColumn(
-                "Severity", finding -> finding.severity().name(), 110);
+                "Важность", finding -> severityName(finding.severity()), 110);
         TableColumn<DiagnosticFinding, String> scope = diagnosticColumn(
-                "Scope", DiagnosticFinding::scope, 220);
+                "Устройство / том", finding -> diagnosticTextFormatter.scopeLabel(
+                        finding, inventory, volumes.getSelectionModel().getSelectedItem()), 320);
         TableColumn<DiagnosticFinding, String> message = diagnosticColumn(
-                "Finding", DiagnosticFinding::message, 650);
+                "Результат", DiagnosticFinding::message, 650);
+        TableColumn<DiagnosticFinding, Void> copy = new TableColumn<>("Копирование");
+        copy.setPrefWidth(115);
+        copy.setCellFactory(column -> new javafx.scene.control.TableCell<>() {
+            private final Button button = new Button("Копировать");
+            {
+                button.setOnAction(event -> {
+                    DiagnosticFinding finding = getTableView().getItems().get(getIndex());
+                    copyOneDiagnostic(finding);
+                });
+            }
+
+            @Override
+            protected void updateItem(Void item, boolean empty) {
+                super.updateItem(item, empty);
+                setGraphic(empty ? null : button);
+            }
+        });
         table.getColumns().add(severity);
         table.getColumns().add(scope);
         table.getColumns().add(message);
+        table.getColumns().add(copy);
         table.setRowFactory(view -> new javafx.scene.control.TableRow<>() {
             @Override
             protected void updateItem(DiagnosticFinding item, boolean empty) {
@@ -730,6 +866,7 @@ public final class MainController {
                         case ERROR -> "-fx-background-color: #fde2e2;";
                         case WARNING -> "-fx-background-color: #fff3cd;";
                         case INFORMATION -> "";
+                        case UNAVAILABLE -> "-fx-background-color: #e8eef5;";
                     });
                 }
             }
@@ -769,20 +906,24 @@ public final class MainController {
     }
 
     private static String fallback(String value) {
-        return value == null || value.isBlank() ? "unavailable" : value;
+        return value == null || value.isBlank() ? "недоступно" : value;
     }
 
     private static String capacityText(long capacity) {
-        return capacity > 0 ? CapacityFormatter.format(capacity) : "unavailable";
-    }
-
-    private static boolean isSystemVolume(VolumeInspection volume) {
-        return volume.volume().mountPoints().stream()
-                .anyMatch(mount -> mount.equalsIgnoreCase("C:\\") || mount.equalsIgnoreCase("C:"));
+        return capacity > 0 ? CapacityFormatter.format(capacity) : "недоступно";
     }
 
     private static String errorText(Throwable error) {
-        return error == null || error.getMessage() == null ? "unknown error" : error.getMessage();
+        return error == null || error.getMessage() == null ? "неизвестная ошибка" : error.getMessage();
+    }
+
+    private static String severityName(io.github.delokoseni.service.diagnostics.DiagnosticSeverity severity) {
+        return switch (severity) {
+            case ERROR -> "ОШИБКА";
+            case WARNING -> "ПРЕДУПРЕЖДЕНИЕ";
+            case INFORMATION -> "ИНФОРМАЦИЯ";
+            case UNAVAILABLE -> "НЕДОСТУПНО";
+        };
     }
 
     private static String panelStyle() {

@@ -35,7 +35,7 @@ class MbrParserTest {
         empty[510] = 0;
         MbrParseResult invalid = parser.parse(reader(empty));
         assertFalse(invalid.signatureValid());
-        assertTrue(invalid.diagnostics().stream().anyMatch(text -> text.contains("signature")));
+        assertTrue(invalid.diagnostics().stream().anyMatch(text -> text.contains("сигнатура")));
     }
 
     @Test
@@ -59,14 +59,14 @@ class MbrParserTest {
         putMbrEntry(outside, 446, 0, 0x0f, 100, 80);
         putEbr(outside, 100, 0, 0, 0, 0x0f, 100, 1);
         assertTrue(parser.parse(reader(outside)).diagnostics().stream()
-                .anyMatch(text -> text.contains("outside")));
+                .anyMatch(text -> text.contains("выходит за границы")));
 
         byte[] cyclic = mbrDisk(1024);
         putMbrEntry(cyclic, 446, 0, 0x0f, 100, 80);
         putEbr(cyclic, 100, 0x07, 1, 10, 0x0f, 20, 60);
         putEbr(cyclic, 120, 0x07, 1, 10, 0x0f, 0, 80);
         assertTrue(parser.parse(reader(cyclic)).diagnostics().stream()
-                .anyMatch(text -> text.contains("Cyclic")));
+                .anyMatch(text -> text.contains("циклическая цепочка")));
     }
 
     @Test
@@ -74,13 +74,13 @@ class MbrParserTest {
         byte[] badSignature = mbrDisk(256);
         putMbrEntry(badSignature, 446, 0, 0x0f, 100, 80);
         assertTrue(parser.parse(reader(badSignature)).diagnostics().stream()
-                .anyMatch(text -> text.contains("Invalid EBR signature")));
+                .anyMatch(text -> text.contains("Недопустимая сигнатура EBR")));
 
         byte[] badLink = mbrDisk(256);
         putMbrEntry(badLink, 446, 0, 0x0f, 100, 80);
         putEbr(badLink, 100, 0, 0, 0, 0x07, 20, 10);
         assertTrue(parser.parse(reader(badLink)).diagnostics().stream()
-                .anyMatch(text -> text.contains("not an extended")));
+                .anyMatch(text -> text.contains("не имеет типа расширенного")));
     }
 
     @Test
@@ -93,7 +93,7 @@ class MbrParserTest {
         }
 
         assertTrue(parser.parse(reader(disk)).diagnostics().stream()
-                .anyMatch(text -> text.contains("exceeded the maximum")));
+                .anyMatch(text -> text.contains("превысила максимальное")));
     }
 
     @Test
@@ -103,22 +103,22 @@ class MbrParserTest {
 
         MbrParseResult result = parser.parse(reader(disk));
 
-        assertTrue(result.diagnostics().stream().anyMatch(text -> text.contains("boot indicator")));
-        assertTrue(result.diagnostics().stream().anyMatch(text -> text.contains("capacity")));
+        assertTrue(result.diagnostics().stream().anyMatch(text -> text.contains("признак загрузки")));
+        assertTrue(result.diagnostics().stream().anyMatch(text -> text.contains("ёмкость")));
     }
 
     @Test
     void refusesTruncatedSectorAndRejectsOverlappingEntries() throws Exception {
         byte[] shortDisk = new byte[256];
         assertTrue(org.junit.jupiter.api.Assertions.assertThrows(java.io.IOException.class,
-                () -> parser.parse(new SyntheticDiskReader(shortDisk, 512, 512)))
-                .getMessage().contains("outside disk"));
+                () -> parser.parse(new SyntheticDiskReader(shortDisk, 512, shortDisk.length)))
+                .getMessage().contains("Недопустимая геометрия диска"));
 
         byte[] disk = mbrDisk(100);
         putMbrEntry(disk, 446, 0, 0x07, 10, 20);
         putMbrEntry(disk, 462, 0, 0x07, 20, 20);
         assertTrue(parser.parse(reader(disk)).diagnostics().stream()
-                .anyMatch(text -> text.contains("Overlapping")));
+                .anyMatch(text -> text.contains("пересекающиеся")));
     }
 
     private static SyntheticDiskReader reader(byte[] bytes) {

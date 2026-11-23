@@ -14,12 +14,12 @@ final class NtfsVolumeDataBufferParser {
     static NtfsVolumeData parse(byte[] buffer, int bytesReturned) throws IOException {
         Objects.requireNonNull(buffer, "buffer");
         if (bytesReturned < STRUCTURE_SIZE) {
-            throw new IOException("NTFS_VOLUME_DATA_BUFFER is truncated: bytesReturned="
-                    + bytesReturned + ", required=" + STRUCTURE_SIZE);
+            throw new IOException("Структура NTFS_VOLUME_DATA_BUFFER усечена: bytesReturned="
+                    + bytesReturned + ", требуется=" + STRUCTURE_SIZE);
         }
         if (bytesReturned > buffer.length) {
             throw new IOException("NTFS_VOLUME_DATA_BUFFER bytesReturned=" + bytesReturned
-                    + " exceeds output buffer size=" + buffer.length);
+                    + " превышает размер выходного буфера=" + buffer.length);
         }
 
         try {
@@ -39,7 +39,7 @@ final class NtfsVolumeDataBufferParser {
                     readNonNegativeInt64(buffer, 80, "MftZoneStart"),
                     readNonNegativeInt64(buffer, 88, "MftZoneEnd"));
         } catch (IllegalArgumentException e) {
-            throw new IOException("NTFS_VOLUME_DATA_BUFFER validation failed: " + e.getMessage(), e);
+            throw new IOException("Ошибка проверки NTFS_VOLUME_DATA_BUFFER: " + e.getMessage(), e);
         }
     }
 
@@ -52,7 +52,7 @@ final class NtfsVolumeDataBufferParser {
         long value = readInt64Bits(bytes, offset);
         if (value < 0) {
             throw new IOException("NTFS_VOLUME_DATA_BUFFER." + field
-                    + " is negative or outside the supported signed 64-bit range: " + value);
+                    + " отрицательно или выходит за поддерживаемый знаковый 64-разрядный диапазон: " + value);
         }
         return value;
     }
@@ -61,7 +61,7 @@ final class NtfsVolumeDataBufferParser {
         long value = Integer.toUnsignedLong(readInt32(bytes, offset));
         if (value == 0 || value > Integer.MAX_VALUE) {
             throw new IOException("NTFS_VOLUME_DATA_BUFFER." + field
-                    + " must be a positive supported DWORD, got " + value);
+                    + " должно быть положительным поддерживаемым DWORD, получено " + value);
         }
         return (int) value;
     }
@@ -70,7 +70,7 @@ final class NtfsVolumeDataBufferParser {
         long value = Integer.toUnsignedLong(readInt32(bytes, offset));
         if (value > Integer.MAX_VALUE) {
             throw new IOException("NTFS_VOLUME_DATA_BUFFER." + field
-                    + " exceeds the supported DWORD range: " + value);
+                    + " превышает поддерживаемый диапазон DWORD: " + value);
         }
         return (int) value;
     }

@@ -9,7 +9,7 @@ public record WindowsPartitionInfo(
         String uniqueGuid) {
     public WindowsPartitionInfo {
         if (partitionNumber < 0 || startingOffsetBytes < 0 || lengthBytes < 0) {
-            throw new IllegalArgumentException("Windows partition number, offset, and length cannot be negative");
+            throw new IllegalArgumentException("Номер раздела Windows, смещение и длина не могут быть отрицательными.");
         }
         typeGuid = typeGuid == null ? "" : typeGuid;
         uniqueGuid = uniqueGuid == null ? "" : uniqueGuid;

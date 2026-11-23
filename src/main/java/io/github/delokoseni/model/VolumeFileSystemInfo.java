@@ -20,10 +20,10 @@ public record VolumeFileSystemInfo(
         volumeLabel = Objects.requireNonNullElse(volumeLabel, "");
         if (maximumComponentNameLength < 0 || totalBytes < 0 || freeBytes < 0 || availableBytes < 0
                 || sectorsPerCluster < 0 || bytesPerSector < 0) {
-            throw new IllegalArgumentException("Filesystem sizes and capacities cannot be negative");
+            throw new IllegalArgumentException("Размеры и ёмкости файловой системы не могут быть отрицательными.");
         }
         if (freeBytes > totalBytes || availableBytes > freeBytes) {
-            throw new IllegalArgumentException("Filesystem free and available capacities are inconsistent");
+            throw new IllegalArgumentException("Свободная и доступная ёмкости файловой системы несогласованы.");
         }
     }
 

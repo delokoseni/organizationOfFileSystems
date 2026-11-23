@@ -49,14 +49,14 @@ public final class WindowsDiskReader implements DiskReader {
 
     public static WindowsDiskReader open(int diskNumber) throws IOException {
         if (!System.getProperty("os.name", "").toLowerCase(Locale.ROOT).startsWith("windows")) {
-            throw new IOException("Physical disk inspection is available only on Windows");
+            throw new IOException("Проверка физических дисков доступна только в Windows.");
         }
         return open(diskNumber, Kernel32Holder.INSTANCE);
     }
 
     static WindowsDiskReader open(int diskNumber, Kernel32 api) throws IOException {
         if (diskNumber < 0) {
-            throw new IllegalArgumentException("Disk number cannot be negative");
+            throw new IllegalArgumentException("Номер физического диска не может быть отрицательным.");
         }
         String path = "\\\\.\\PhysicalDrive" + diskNumber;
         Pointer handle = api.CreateFileW(path, GENERIC_READ,
@@ -76,19 +76,19 @@ public final class WindowsDiskReader implements DiskReader {
                 throw nativeError("IOCTL_DISK_GET_DRIVE_GEOMETRY_EX", path, error);
             }
             if (bytesReturned.getValue() < 32) {
-                throw new IOException("IOCTL_DISK_GET_DRIVE_GEOMETRY_EX returned an incomplete response for "
-                        + path + " (" + bytesReturned.getValue() + " bytes)");
+                throw new IOException("IOCTL_DISK_GET_DRIVE_GEOMETRY_EX вернул неполный ответ для "
+                        + path + " (" + bytesReturned.getValue() + " байт).");
             }
             int sectorSize = readInt32LE(geometry, 20);
             long size;
             try {
                 size = readInt64LE(geometry, 24);
             } catch (IllegalArgumentException e) {
-                throw new IOException("Windows returned unsupported disk capacity", e);
+                throw new IOException("Windows вернула неподдерживаемое значение ёмкости диска.", e);
             }
             if (sectorSize < 512 || sectorSize > MAX_LOGICAL_SECTOR_SIZE
                     || size < sectorSize || size % sectorSize != 0) {
-                throw new IOException("Windows returned invalid disk geometry");
+                throw new IOException("Windows вернула недопустимую геометрию диска.");
             }
             return new WindowsDiskReader(api, handle, path, size, sectorSize);
         } catch (IOException | RuntimeException e) {
@@ -109,29 +109,29 @@ public final class WindowsDiskReader implements DiskReader {
 
     public synchronized WindowsPartitionLayout readWindowsPartitionLayout() throws IOException {
         if (closed) {
-            throw new IOException("Disk reader is closed");
+            throw new IOException("Дескриптор диска закрыт.");
         }
         byte[] layout = new byte[DRIVE_LAYOUT_BUFFER_SIZE];
         IntByReference bytesReturned = new IntByReference();
         if (!api.DeviceIoControl(handle, IOCTL_DISK_GET_DRIVE_LAYOUT_EX, null, 0,
                 layout, layout.length, bytesReturned, null)) {
             int error = api.GetLastError();
-            throw nativeError("IOCTL_DISK_GET_DRIVE_LAYOUT_EX failed", devicePath, error);
+            throw nativeError("IOCTL_DISK_GET_DRIVE_LAYOUT_EX", devicePath, error);
         }
         return new WindowsLayoutBufferParser().parse(layout, bytesReturned.getValue());
     }
 
     public synchronized StorageDeviceIdentity readStorageDeviceIdentity() throws IOException {
         if (closed) {
-            throw new IOException("Disk reader is closed");
+            throw new IOException("Дескриптор диска закрыт.");
         }
         byte[] descriptor = readStorageDescriptor(STORAGE_DEVICE_PROPERTY, STORAGE_DESCRIPTOR_BUFFER_SIZE);
         if (descriptor.length < 36) {
-            throw new IOException("Windows returned an incomplete storage device descriptor");
+            throw new IOException("Windows вернула неполный дескриптор устройства хранения.");
         }
         long descriptorSize = Integer.toUnsignedLong(readInt32LE(descriptor, 4));
         if (descriptorSize < 36 || descriptorSize > descriptor.length) {
-            throw new IOException("Storage device descriptor size is outside returned buffer bounds");
+            throw new IOException("Размер дескриптора устройства хранения выходит за границы полученного буфера.");
         }
         int descriptorLength = Math.toIntExact(descriptorSize);
         String vendor = descriptorString(descriptor, descriptorLength,
@@ -146,42 +146,42 @@ public final class WindowsDiskReader implements DiskReader {
 
     public synchronized int readPhysicalSectorSize() throws IOException {
         if (closed) {
-            throw new IOException("Disk reader is closed");
+            throw new IOException("Дескриптор диска закрыт.");
         }
         byte[] descriptor = readStorageDescriptor(STORAGE_ACCESS_ALIGNMENT_PROPERTY, 32);
         if (descriptor.length < 24) {
-            throw new IOException("Windows returned an incomplete storage alignment descriptor");
+            throw new IOException("Windows вернула неполный дескриптор выравнивания хранения.");
         }
         long size = Integer.toUnsignedLong(readInt32LE(descriptor, 4));
         long physicalSectorSize = Integer.toUnsignedLong(readInt32LE(descriptor, 20));
         if (size < 24 || size > descriptor.length
                 || physicalSectorSize <= 0 || physicalSectorSize > Integer.MAX_VALUE) {
-            throw new IOException("Windows returned invalid physical sector information");
+            throw new IOException("Windows вернула недопустимые сведения о физическом секторе.");
         }
         return (int) physicalSectorSize;
     }
 
     private byte[] readStorageDescriptor(int propertyId, int bufferSize) throws IOException {
         if (propertyId != STORAGE_DEVICE_PROPERTY && propertyId != STORAGE_ACCESS_ALIGNMENT_PROPERTY) {
-            throw new IllegalArgumentException("Storage property is not on the read-only allowlist");
+            throw new IllegalArgumentException("Свойство хранения отсутствует в списке разрешённых запросов только для чтения.");
         }
         // The trailing AdditionalParameters[1] and DWORD alignment make this structure 12 bytes.
         byte[] query = new byte[STORAGE_PROPERTY_QUERY_SIZE];
         writeInt32LE(query, 0, propertyId);
         writeInt32LE(query, 4, PROPERTY_STANDARD_QUERY);
         if (bufferSize <= 0 || bufferSize > STORAGE_DESCRIPTOR_BUFFER_SIZE) {
-            throw new IllegalArgumentException("Storage descriptor buffer exceeds configured limit");
+            throw new IllegalArgumentException("Буфер дескриптора хранения превышает установленный предел.");
         }
         byte[] descriptor = new byte[bufferSize];
         IntByReference bytesReturned = new IntByReference();
         if (!api.DeviceIoControl(handle, IOCTL_STORAGE_QUERY_PROPERTY, query, query.length,
                 descriptor, descriptor.length, bytesReturned, null)) {
             int error = api.GetLastError();
-            throw nativeError("IOCTL_STORAGE_QUERY_PROPERTY failed for property " + propertyId,
+            throw nativeError("IOCTL_STORAGE_QUERY_PROPERTY, свойство " + propertyId,
                     devicePath, error);
         }
         if (bytesReturned.getValue() < 4 || bytesReturned.getValue() > descriptor.length) {
-            throw new IOException("Windows returned an incomplete storage property descriptor");
+            throw new IOException("Windows вернула неполный дескриптор свойства хранения.");
         }
         return java.util.Arrays.copyOf(descriptor, bytesReturned.getValue());
     }
@@ -189,11 +189,11 @@ public final class WindowsDiskReader implements DiskReader {
     @Override
     public synchronized byte[] read(long offset, int length) throws IOException {
         if (closed) {
-            throw new IOException("Disk reader is closed");
+            throw new IOException("Дескриптор диска закрыт.");
         }
         DiskReadRange.validate(offset, length, diskSize);
         if (length > MAX_READ_BYTES) {
-            throw new IllegalArgumentException("Read request exceeds the 64 MiB safety limit");
+            throw new IllegalArgumentException("Запрос чтения превышает ограничение безопасности 64 МиБ.");
         }
         long requestedEnd = Math.addExact(offset, (long) length);
         long alignedOffset = offset - offset % logicalSectorSize;
@@ -203,29 +203,29 @@ public final class WindowsDiskReader implements DiskReader {
         try {
             alignedEnd = Math.multiplyExact(endingSector, (long) logicalSectorSize);
         } catch (ArithmeticException e) {
-            throw new IOException("Aligned disk read range overflows", e);
+            throw new IOException("Выровненный диапазон чтения диска выходит за допустимые границы.", e);
         }
         if (alignedEnd > diskSize) {
-            throw new IOException(readContext("Aligned read range exceeds disk capacity",
+            throw new IOException(readContext("Выровненный диапазон чтения превышает ёмкость диска",
                     alignedOffset, Math.toIntExact(Math.min(alignedEnd - alignedOffset, Integer.MAX_VALUE)), 0)
                     + " for " + devicePath);
         }
         long alignedLengthLong = alignedEnd - alignedOffset;
         if (alignedLengthLong <= 0 || alignedLengthLong > MAX_READ_BYTES) {
-            throw new IllegalArgumentException("Sector-aligned read request exceeds the 64 MiB safety limit");
+            throw new IllegalArgumentException("Выровненный по секторам запрос превышает ограничение 64 МиБ.");
         }
         int alignedLength = Math.toIntExact(alignedLengthLong);
         byte[] alignedData = new byte[alignedLength];
         LongByReference newPosition = new LongByReference();
         if (!api.SetFilePointerEx(handle, alignedOffset, newPosition, FILE_BEGIN)) {
             int error = api.GetLastError();
-            throw nativeError(readContext("SetFilePointerEx failed", alignedOffset, alignedLength, 0)
+            throw nativeError(readContext("ошибка SetFilePointerEx", alignedOffset, alignedLength, 0)
                             + ", requestedOffset=" + offset + ", requestedLength=" + length,
                     devicePath, error);
         }
         if (newPosition.getValue() != alignedOffset) {
-            throw new IOException(readContext("SetFilePointerEx positioned at "
-                    + newPosition.getValue() + " instead of the aligned read offset",
+            throw new IOException(readContext("SetFilePointerEx установил смещение "
+                    + newPosition.getValue() + " вместо выровненного смещения",
                     alignedOffset, alignedLength, 0)
                     + ", requestedOffset=" + offset + ", requestedLength=" + length
                     + " for " + devicePath);
@@ -238,19 +238,19 @@ public final class WindowsDiskReader implements DiskReader {
             if (!api.ReadFile(handle, chunk, chunk.length, bytesRead, null)) {
                 int error = api.GetLastError();
                 int actualBytes = bytesRead.getValue();
-                String context = readContext("ReadFile failed", alignedOffset + totalRead,
+                String context = readContext("ошибка ReadFile", alignedOffset + totalRead,
                         chunk.length, actualBytes) + ", requestedOffset=" + offset
                         + ", requestedLength=" + length;
                 throw nativeError(context, devicePath, error);
             }
             int count = bytesRead.getValue();
             if (count <= 0 || count > chunk.length) {
-                throw new EOFException(readContext("Incomplete aligned read", alignedOffset + totalRead,
+                throw new EOFException(readContext("Неполное выровненное чтение", alignedOffset + totalRead,
                         chunk.length, totalRead + Math.max(count, 0)) + ", requestedOffset=" + offset
                         + ", requestedLength=" + length + " for " + devicePath);
             }
             if (count % logicalSectorSize != 0) {
-                throw new EOFException(readContext("Device returned a partial non-sector-aligned read",
+                throw new EOFException(readContext("Устройство вернуло неполный, не выровненный по сектору блок",
                         alignedOffset + totalRead, chunk.length, totalRead + count)
                         + ", requestedOffset=" + offset + ", requestedLength=" + length
                         + " for " + devicePath);
@@ -268,7 +268,7 @@ public final class WindowsDiskReader implements DiskReader {
             closed = true;
             if (!api.CloseHandle(handle)) {
                 int error = api.GetLastError();
-                throw nativeError("Could not close physical disk handle", devicePath, error);
+                throw nativeError("Не удалось закрыть дескриптор физического диска", devicePath, error);
             }
         }
     }
@@ -321,7 +321,7 @@ public final class WindowsDiskReader implements DiskReader {
         long high = Integer.toUnsignedLong(readInt32LE(bytes, offset + 4));
         long value = (high << 32) | low;
         if (value < 0) {
-            throw new IllegalArgumentException("Disk sizes above signed 64-bit range are unsupported");
+            throw new IllegalArgumentException("Размеры диска выше предела знакового 64-разрядного числа не поддерживаются.");
         }
         return value;
     }

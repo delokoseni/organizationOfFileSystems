@@ -44,7 +44,7 @@ class NtfsVolumeDataBufferParserTest {
         assertTrue(truncated.getMessage().contains("bytesReturned=95"));
         IOException tooLarge = assertThrows(IOException.class,
                 () -> NtfsVolumeDataBufferParser.parse(buffer, 129));
-        assertTrue(tooLarge.getMessage().contains("exceeds output buffer size"));
+        assertTrue(tooLarge.getMessage().contains("превышает размер выходного буфера"));
     }
 
     @Test

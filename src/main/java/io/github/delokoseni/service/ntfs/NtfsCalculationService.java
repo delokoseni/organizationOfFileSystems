@@ -7,25 +7,25 @@ public final class NtfsCalculationService {
     public NtfsMetrics calculate(NtfsVolumeData data) {
         if (data.bytesPerSector() <= 0 || data.bytesPerCluster() <= 0
                 || data.numberOfSectors() <= 0 || data.totalClusters() <= 0) {
-            throw new IllegalArgumentException("NTFS sector geometry and volume counts must be positive");
+            throw new IllegalArgumentException("Размеры секторов NTFS и счётчики тома должны быть положительными.");
         }
         if (data.bytesPerCluster() % data.bytesPerSector() != 0) {
-            throw new IllegalArgumentException("Cluster size must be a whole number of sectors");
+            throw new IllegalArgumentException("Размер кластера должен содержать целое число секторов.");
         }
         if (data.freeClusters() > data.totalClusters()
                 || data.reservedClusters() > data.totalClusters()
                 || data.freeClusters() > data.totalClusters() - data.reservedClusters()) {
-            throw new IllegalArgumentException("NTFS free and reserved cluster counts are inconsistent");
+            throw new IllegalArgumentException("Количество свободных и зарезервированных кластеров NTFS несогласовано.");
         }
         validateLcn(data.mftStartLcn(), data.totalClusters(), false, "MFT");
         validateLcn(data.mftMirrorStartLcn(), data.totalClusters(), false, "MFT mirror");
         validateLcn(data.mftZoneStartLcn(), data.totalClusters(), true, "MFT zone start");
         validateLcn(data.mftZoneEndLcn(), data.totalClusters(), true, "MFT zone end");
         if (data.mftZoneEndLcn() < data.mftZoneStartLcn()) {
-            throw new IllegalArgumentException("NTFS MFT zone end precedes its start");
+            throw new IllegalArgumentException("Конец зоны MFT NTFS предшествует её началу.");
         }
         if (data.bytesPerFileRecordSegment() <= 0) {
-            throw new IllegalArgumentException("NTFS file record segment size must be positive");
+            throw new IllegalArgumentException("Размер сегмента записи файла NTFS должен быть положительным.");
         }
 
         try {
@@ -36,10 +36,10 @@ public final class NtfsCalculationService {
             long totalSectorCapacity = Math.multiplyExact(data.numberOfSectors(), (long) data.bytesPerSector());
             if (totalCapacity > totalSectorCapacity
                     || data.totalClusters() > data.numberOfSectors() / sectorsPerCluster) {
-                throw new IllegalArgumentException("NTFS cluster count exceeds reported volume sectors");
+                throw new IllegalArgumentException("Количество кластеров NTFS превышает число секторов тома.");
             }
             if (data.mftValidDataLength() > totalCapacity) {
-                throw new IllegalArgumentException("NTFS MFT valid data length exceeds cluster capacity");
+                throw new IllegalArgumentException("Длина действительных данных MFT превышает ёмкость кластеров.");
             }
             long mftOffset = Math.multiplyExact(data.mftStartLcn(), (long) data.bytesPerCluster());
             long mirrorOffset = Math.multiplyExact(data.mftMirrorStartLcn(), (long) data.bytesPerCluster());
@@ -48,13 +48,13 @@ public final class NtfsCalculationService {
             return new NtfsMetrics(sectorsPerCluster, totalCapacity, usedClusters, freeCapacity,
                     mftOffset, mirrorOffset, data.bytesPerFileRecordSegment(), zoneBytes);
         } catch (ArithmeticException e) {
-            throw new IllegalArgumentException("NTFS metric calculation overflows 64-bit capacity", e);
+            throw new IllegalArgumentException("Переполнение 64-разрядного диапазона при расчёте параметров NTFS.", e);
         }
     }
 
     private static void validateLcn(long lcn, long totalClusters, boolean allowEnd, String field) {
         if (lcn < 0 || lcn > totalClusters || (!allowEnd && lcn == totalClusters)) {
-            throw new IllegalArgumentException(field + " LCN is outside the volume");
+            throw new IllegalArgumentException(field + " LCN находится за границами тома.");
         }
     }
 }

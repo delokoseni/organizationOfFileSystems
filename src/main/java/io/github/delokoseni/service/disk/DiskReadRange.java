@@ -6,17 +6,17 @@ public final class DiskReadRange {
 
     public static long validate(long offset, int length, long diskSize) {
         if (offset < 0 || length <= 0 || diskSize < 0) {
-            throw new IllegalArgumentException("Disk size and read offset cannot be negative; "
-                    + "read length must be positive");
+            throw new IllegalArgumentException("Размер диска и смещение чтения не могут быть отрицательными; "
+                    + "длина чтения должна быть положительной.");
         }
         long end;
         try {
             end = Math.addExact(offset, length);
         } catch (ArithmeticException e) {
-            throw new IllegalArgumentException("Read range overflows", e);
+            throw new IllegalArgumentException("Переполнение диапазона чтения.", e);
         }
         if (end > diskSize) {
-            throw new IllegalArgumentException("Read range extends beyond disk capacity");
+            throw new IllegalArgumentException("Диапазон чтения выходит за ёмкость диска.");
         }
         return end;
     }

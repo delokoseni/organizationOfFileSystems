@@ -1,4 +1,4 @@
-# File System Organization — Read-only Disk Inspector
+# File System Organization — универсальный анализатор дисков (только чтение)
 
 This Java 21 / JavaFX application uses a layered design: JavaFX application and
 controller, immutable models, disk/volume services, independent binary parsers,
@@ -24,18 +24,19 @@ and a narrow Windows-native adapter. Maven provides JavaFX, JNA, and JUnit 5.
   differences without correcting either result.
 - Synthetic in-memory parser fixtures and tests only; no test opens a physical
   disk or volume.
-- A JavaFX shell with a persistent **READ-ONLY** indicator, asynchronous volume
-  refresh, and **Analyze ADATA SE760 (D:)** gated by fresh D:-to-disk mapping,
-  exact model verification, partition-boundary checks, and explicit confirmation.
+- A Russian-language JavaFX interface with a persistent read-only indicator,
+  asynchronous disk and volume refresh, independent disk selection, and
+  **Анализировать выбранный том** gated by fresh volume-to-disk mapping,
+  partition-boundary checks, and explicit confirmation.
 - An integrated disk/volume inventory view with partition tables, selected
   partition details, filesystem/volume metadata, NTFS/MFT results, and severity-
-  classified validation findings. The D: action remains disabled until a refresh
-  verifies its model and mapping; the action repeats those checks before
-  confirmation and before the NTFS query.
-- A uniquely mapped D: volume and matching Windows PnP model can identify and
-  highlight ADATA SE760 even when raw reads are denied. This identification does
-  not enable analysis: the separate action still requires raw read access,
-  storage identity, partition-boundary checks, and explicit confirmation.
+  classified validation findings filtered to the selected volume and its
+  associated physical disk; with no volume selected, device diagnostics remain
+  visible with their disk/volume scope. Refresh clears cached per-volume
+  findings. A volume can be selected by its volume GUID,
+  including when it has no drive letter. The selected volume is resolved again
+  before confirmation and before any NTFS query; a missing selection is never
+  replaced by another volume.
 - Physical disks are discovered independently through the Windows SetupAPI disk
   interface and PnP device properties. When a PnP object name has no disk number,
   `IOCTL_STORAGE_GET_DEVICE_NUMBER` is queried through a handle requesting zero
@@ -54,7 +55,7 @@ and a narrow Windows-native adapter. Maven provides JavaFX, JNA, and JUnit 5.
 - Volume extent reads using `IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS`, with
   explicit physical disk numbers and checked ranges. Extent-to-partition mapping
   supports multiple extents and reports absent or ambiguous partition matches.
-- Read-only `FSCTL_GET_NTFS_VOLUME_DATA` queries only after the external target
+- Read-only `FSCTL_GET_NTFS_VOLUME_DATA` queries only after the selected volume
   has passed fresh identity checks and the user confirms, plus checked
   calculations for cluster capacities, used/free counts, MFT/MFT mirror
   volume-relative offsets, record size, and MFT zone size. Direct MFT records
@@ -98,8 +99,15 @@ Partition entries are decoded only after boundary validation. Header CRC32 is
 computed over `HeaderSize` bytes after zeroing the four-byte CRC field at offset
 16. The entry-array CRC32 covers exactly `NumberOfPartitionEntries *
 SizeOfPartitionEntry` bytes. Primary/backup GUIDs, usable ranges, entry
-dimensions, and entries are compared diagnostically. No repair, copy, or write
-path exists.
+dimensions, and entries are compared diagnostically. GPT metadata is not
+considered an active partition table based on signatures alone: its CRCs and
+locations are validated, and verified MBR partitions are retained when GPT
+remnants are invalid. Hybrid or ambiguous layouts are reported without exposing
+unverified GPT entries as partitions. A verified MBR does not require a
+protective `0xEE` entry; invalid GPT remnants are reported separately as
+warnings. For an active GPT layout, a present but incorrectly sized protective
+MBR entry is distinguished from a missing entry. No repair, copy, or write path
+exists.
 
 ## Windows and volume comparison
 
@@ -108,9 +116,12 @@ size. `IOCTL_STORAGE_QUERY_PROPERTY` retrieves model/vendor strings and physical
 sector alignment. `IOCTL_DISK_GET_DRIVE_LAYOUT_EX` is decoded separately from
 the independent sector parser. The comparison service reports discrepancies;
 it never chooses a Windows result to overwrite parsed data or attempts a
-correction. The volume tab initiates read-only volume enumeration in a
-background task. Filesystem sector and cluster sizes are separate values and
-are not assumed to equal physical or logical disk sector sizes.
+correction. Zero-filled unused entries in the Windows layout buffer are
+excluded from the actual partition list; the API's slot count is not assumed to
+be the number of populated partitions. The volume tab initiates read-only
+volume enumeration in a background task. Filesystem sector and cluster sizes
+are separate values and are not assumed to equal physical or logical disk
+sector sizes.
 
 An LBA is a logical sector index relative to a physical disk. An LCN is a logical
 cluster index relative to a volume. Multiplying an LCN by the NTFS cluster size
@@ -122,24 +133,33 @@ from an LCN. It also does not infer a Windows filesystem/volume version from
 Filesystem capability flags describe supported filesystem features; they do not
 mean each file uses the feature. Filesystem capacity can differ from partition
 length because of metadata, reserved regions, filesystem policy, and capacity
-reporting semantics. Differences are diagnostic only.
+reporting semantics. Differences are diagnostic only. When the NTFS BPB and
+FSCTL sector counts disagree with the mapped extent, the analyzer reads the
+BPB-indicated terminal sector and a bounded trailing range read-only, recording
+matching boot-sector copies, zero-filled sectors, other data, and unreadable
+sectors. Boundary messages distinguish volume-relative LBAs from absolute
+physical-disk LBAs and consolidate the counts, extent difference, and observed
+boot-sector evidence into one warning. A matching copy at the partition end
+alone never validates the NTFS boundary; unresolved discrepancies remain
+warnings.
 
 ## Safety and limitations
 
 The general volume refresh reads volume metadata and extents but does not issue
-the NTFS FSCTL. The dedicated action resolves the current D: volume, requires a
-unique physical disk number from its extents, opens only that mapped disk with
-`GENERIC_READ`, checks the storage descriptor for an exact ADATA SE760 model,
-and maps all extents to Windows partition boundaries. It presents the disk
-number, capacity, volume GUID, filesystem, and partition boundaries for explicit
-confirmation. After confirmation it repeats identity/mapping checks before
-opening the volume for the NTFS query. Any missing, changed, or ambiguous
-information stops the operation; C: is never a fallback.
+the NTFS FSCTL. The analysis action uses only the currently selected volume GUID,
+requires its extents to map to one physical disk, opens that disk with
+`GENERIC_READ`, and maps all extents to Windows partition boundaries. Volumes
+spanning multiple physical disks are reported as unsupported by this workflow;
+the application never selects one of their disks as a substitute. The action
+presents the current device, volume, filesystem, and partition information for
+explicit confirmation. After confirmation it repeats identity and mapping checks
+before opening that volume for the NTFS query. Any missing, changed, or
+ambiguous information stops the operation; no default volume is used.
 
 The volume extent response is decoded only in a 64-bit Windows process; other
 process architectures fail closed for disk-to-partition mapping. If Windows does
-not return a complete storage descriptor or exact model string, the dedicated
-analysis stops rather than guessing.
+not return a complete storage descriptor, the selected disk's model is shown as
+unavailable; analysis never depends on a particular model name.
 
 Physical disks are enumerated using `SetupDiGetClassDevsW`,
 `SetupDiEnumDeviceInterfaces`, `SetupDiGetDeviceInterfaceDetailW`, and

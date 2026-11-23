@@ -7,7 +7,7 @@ import java.util.List;
 import java.util.Objects;
 import java.util.OptionalInt;
 
-public final class ExternalVolumeCandidate {
+public final class VolumeAnalysisCandidate {
     private final VolumeInspection volumeInspection;
     private final int physicalDiskNumber;
     private final String model;
@@ -16,8 +16,9 @@ public final class ExternalVolumeCandidate {
     private final int logicalSectorSize;
     private final OptionalInt physicalSectorSize;
     private final List<WindowsPartitionInfo> partitions;
+    private final List<String> diagnostics;
 
-    ExternalVolumeCandidate(
+    VolumeAnalysisCandidate(
             VolumeInspection volumeInspection,
             int physicalDiskNumber,
             String model,
@@ -26,6 +27,20 @@ public final class ExternalVolumeCandidate {
             int logicalSectorSize,
             OptionalInt physicalSectorSize,
             List<WindowsPartitionInfo> partitions) {
+        this(volumeInspection, physicalDiskNumber, model, serialNumber, diskCapacityBytes,
+                logicalSectorSize, physicalSectorSize, partitions, List.of());
+    }
+
+    VolumeAnalysisCandidate(
+            VolumeInspection volumeInspection,
+            int physicalDiskNumber,
+            String model,
+            String serialNumber,
+            long diskCapacityBytes,
+            int logicalSectorSize,
+            OptionalInt physicalSectorSize,
+            List<WindowsPartitionInfo> partitions,
+            List<String> diagnostics) {
         this.volumeInspection = Objects.requireNonNull(volumeInspection);
         this.physicalDiskNumber = physicalDiskNumber;
         this.model = Objects.requireNonNull(model);
@@ -34,6 +49,7 @@ public final class ExternalVolumeCandidate {
         this.logicalSectorSize = logicalSectorSize;
         this.physicalSectorSize = Objects.requireNonNull(physicalSectorSize);
         this.partitions = List.copyOf(partitions);
+        this.diagnostics = List.copyOf(diagnostics);
     }
 
     public VolumeInspection volumeInspection() {
@@ -66,5 +82,9 @@ public final class ExternalVolumeCandidate {
 
     public List<WindowsPartitionInfo> partitions() {
         return partitions;
+    }
+
+    public List<String> diagnostics() {
+        return diagnostics;
     }
 }

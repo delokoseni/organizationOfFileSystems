@@ -13,12 +13,12 @@ public final class DiskOpenException extends IOException {
     public DiskOpenException(
             String devicePath, int desiredAccess, int shareMode,
             int creationDisposition, int flagsAndAttributes, int win32Error) {
-        super("CreateFileW failed for " + devicePath
+        super("Не удалось выполнить CreateFileW для " + devicePath
                 + " (desiredAccess=0x" + Integer.toHexString(desiredAccess)
                 + ", shareMode=0x" + Integer.toHexString(shareMode)
                 + ", creationDisposition=" + creationDisposition
                 + ", flagsAndAttributes=0x" + Integer.toHexString(flagsAndAttributes)
-                + ", Win32 error " + win32Error + ")");
+                + ", ошибка Win32 " + win32Error + " " + Win32ErrorNames.name(win32Error) + ")");
         this.devicePath = devicePath;
         this.desiredAccess = desiredAccess;
         this.shareMode = shareMode;

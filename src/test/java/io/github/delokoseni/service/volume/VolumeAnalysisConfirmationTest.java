@@ -12,20 +12,20 @@ import java.util.OptionalInt;
 
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
-class ExternalVolumeConfirmationTest {
+class VolumeAnalysisConfirmationTest {
     @Test
     void refusesNtfsQueryWithoutExplicitConfirmationBeforeAnyNativeAccess() {
         VolumeFileSystemInfo fileSystem = new VolumeFileSystemInfo("NTFS", "", 1,
                 255, 0, 4096, 2048, 1024, 1, 512);
-        VolumeInfo volume = new VolumeInfo("\\\\?\\Volume{d}\\", List.of("D:\\"), "NTFS",
+        VolumeInfo volume = new VolumeInfo("\\\\?\\Volume{sample}\\", List.of(), "NTFS",
                 "", 4096, 2048, 512);
         VolumeInspection inspection = new VolumeInspection(volume, Optional.of(fileSystem),
                 List.of(new DiskExtent(8, 1024, 4096)), Optional.empty(), List.of());
-        ExternalVolumeCandidate candidate = new ExternalVolumeCandidate(
-                inspection, 8, "ADATA SE760", "TEST-SERIAL", 8192,
+        VolumeAnalysisCandidate candidate = new VolumeAnalysisCandidate(
+                inspection, 8, "Generic storage device", "TEST-SERIAL", 8192,
                 512, OptionalInt.of(4096), List.of());
 
         assertThrows(java.io.IOException.class,
-                () -> new WindowsVolumeService().inspectVerifiedAdataD(candidate, false));
+                () -> new WindowsVolumeService().inspectVerifiedVolume(candidate, false));
     }
 }

@@ -27,15 +27,15 @@ public final class WindowsPrivilegeService {
         try {
             return administratorCheck.getAsBoolean();
         } catch (LinkageError e) {
-            throw new IOException("Could not determine Windows administrator membership", e);
+            throw new IOException("Не удалось определить членство в группе администраторов Windows.", e);
         }
     }
 
     public String accessDeniedGuidance() throws IOException {
         return isAdministrator()
-                ? "The process is in the administrator group, but device ACLs or policy still denied access."
-                : "Raw physical-disk reads commonly require an elevated administrator token. "
-                + "Restart explicitly as administrator if appropriate; the application did not elevate itself.";
+                ? "Процесс состоит в группе администраторов, однако ACL устройства или политика всё равно запретили доступ."
+                : "Чтение физических дисков обычно требует повышенного токена администратора. "
+                + "При необходимости перезапустите приложение от имени администратора; приложение не повышало привилегии самостоятельно.";
     }
 
     private interface Shell32 extends StdCallLibrary {

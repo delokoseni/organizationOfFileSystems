@@ -11,7 +11,7 @@ public final class CapacityFormatter {
 
     public static String format(long bytes) {
         if (bytes < 0) {
-            throw new IllegalArgumentException("Capacity cannot be negative");
+            throw new IllegalArgumentException("Ёмкость не может быть отрицательной.");
         }
         if (bytes < 1024) {
             return bytes + " B";

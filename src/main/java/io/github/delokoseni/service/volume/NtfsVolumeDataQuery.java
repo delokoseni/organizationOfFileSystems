@@ -25,8 +25,8 @@ final class NtfsVolumeDataQuery {
         IntByReference bytesReturned = new IntByReference();
         if (!deviceIoControl.invoke(buffer, bytesReturned)) {
             int error = getLastError.getAsInt();
-            throw new IOException("FSCTL_GET_NTFS_VOLUME_DATA failed "
-                    + "(Win32 error " + error + " " + Win32ErrorNames.name(error) + ")");
+            throw new IOException("Сбой FSCTL_GET_NTFS_VOLUME_DATA "
+                    + "(ошибка Win32 " + error + " " + Win32ErrorNames.name(error) + ")");
         }
         return NtfsVolumeDataBufferParser.parse(buffer, bytesReturned.getValue());
     }

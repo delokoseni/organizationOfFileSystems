@@ -20,7 +20,7 @@ public final class MbrParser {
         int sectorSize = reader.getLogicalSectorSize();
         if (sectorSize < MBR_MIN_SIZE || sectorSize > MAX_LOGICAL_SECTOR_SIZE
                 || reader.getDiskSize() < sectorSize || reader.getDiskSize() % sectorSize != 0) {
-            throw new IOException("Invalid disk geometry or logical sector size for MBR parsing");
+            throw new IOException("Недопустимая геометрия диска или размер логического сектора для разбора MBR.");
         }
         byte[] sector = reader.read(0, sectorSize);
         List<String> diagnostics = new ArrayList<>();
@@ -28,7 +28,7 @@ public final class MbrParser {
         List<PartitionRecord> logical = new ArrayList<>();
         boolean validSignature = u8(sector, 510) == 0x55 && u8(sector, 511) == 0xaa;
         if (!validSignature) {
-            diagnostics.add("Invalid MBR signature (expected 0x55AA).");
+            diagnostics.add("Недопустимая сигнатура MBR (ожидалось 0x55AA).");
         }
 
         long diskSectors = reader.getDiskSize() / sectorSize;
@@ -40,11 +40,11 @@ public final class MbrParser {
                 continue;
             }
             if (!validBootFlag(entry.bootFlag)) {
-                diagnostics.add("Primary entry " + (i + 1) + " has invalid boot indicator 0x"
+                diagnostics.add("Основная запись " + (i + 1) + " содержит недопустимый признак загрузки 0x"
                         + Integer.toHexString(entry.bootFlag) + ".");
             }
             PartitionRecord record = toMbrRecord(entry, sectorSize, diskSectors,
-                    "Primary " + (i + 1), diagnostics, i + 1);
+                    "Основной раздел " + (i + 1), diagnostics, i + 1);
             if (record != null) {
                 primary.add(record);
                 if (isExtended(entry.type)) {
@@ -73,11 +73,11 @@ public final class MbrParser {
         try {
             endExclusive = Math.addExact(base, Integer.toUnsignedLong(container.sectors));
         } catch (ArithmeticException e) {
-            diagnostics.add("Extended partition boundary overflows.");
+            diagnostics.add("Переполнение границы расширенного раздела.");
             return;
         }
         if (container.sectors == 0 || endExclusive > diskSectors) {
-            diagnostics.add("Extended partition is empty or outside disk capacity.");
+            diagnostics.add("Расширенный раздел пуст или выходит за ёмкость диска.");
             return;
         }
 
@@ -85,11 +85,11 @@ public final class MbrParser {
         long ebrLba = base;
         for (int depth = 0; depth < EBR_CHAIN_LIMIT; depth++) {
             if (ebrLba < base || ebrLba >= endExclusive || ebrLba >= diskSectors) {
-                diagnostics.add("EBR link points outside its extended partition or disk.");
+                diagnostics.add("Ссылка EBR выходит за границы расширенного раздела или диска.");
                 return;
             }
             if (!visited.add(ebrLba)) {
-                diagnostics.add("Cyclic EBR chain detected at LBA " + ebrLba + ".");
+                diagnostics.add("Обнаружена циклическая цепочка EBR на LBA " + ebrLba + ".");
                 return;
             }
 
@@ -97,11 +97,11 @@ public final class MbrParser {
             try {
                 ebr = reader.read(Math.multiplyExact(ebrLba, (long) sectorSize), sectorSize);
             } catch (IOException | ArithmeticException e) {
-                diagnostics.add("Could not read EBR at LBA " + ebrLba + ": " + e.getMessage());
+                diagnostics.add("Не удалось прочитать EBR на LBA " + ebrLba + ": " + e.getMessage());
                 return;
             }
             if (u8(ebr, 510) != 0x55 || u8(ebr, 511) != 0xaa) {
-                diagnostics.add("Invalid EBR signature at LBA " + ebrLba + ".");
+                diagnostics.add("Недопустимая сигнатура EBR на LBA " + ebrLba + ".");
                 return;
             }
 
@@ -109,29 +109,30 @@ public final class MbrParser {
             RawEntry link = readEntry(ebr, PARTITION_TABLE_OFFSET + PARTITION_ENTRY_SIZE);
             if (!data.isEmpty()) {
                 if (!validBootFlag(data.bootFlag)) {
-                    diagnostics.add("Logical partition at EBR " + ebrLba + " has an invalid boot indicator.");
+                    diagnostics.add("Логический раздел в EBR " + ebrLba
+                            + " имеет недопустимый признак загрузки.");
                 }
                 if (data.startLba == 0) {
-                    diagnostics.add("Logical partition at EBR " + ebrLba
-                            + " starts on the EBR sector itself.");
+                    diagnostics.add("Логический раздел в EBR " + ebrLba
+                            + " начинается с самого сектора EBR.");
                 } else if (isExtended(data.type)) {
-                    diagnostics.add("EBR data entry at LBA " + ebrLba
-                            + " has an extended-partition type.");
+                    diagnostics.add("Запись данных EBR на LBA " + ebrLba
+                            + " содержит тип расширенного раздела.");
                 } else {
                     long first;
                     try {
                         first = Math.addExact(ebrLba, Integer.toUnsignedLong(data.startLba));
                     } catch (ArithmeticException e) {
-                        diagnostics.add("Logical partition start LBA overflows.");
+                        diagnostics.add("Переполнение начального LBA логического раздела.");
                         return;
                     }
                     PartitionRecord part = toMbrRecord(new RawEntry(data.bootFlag, data.type,
                                     data.startLba, data.sectors, first),
-                            sectorSize, diskSectors, "Logical", diagnostics, ebrLba);
+                            sectorSize, diskSectors, "Логический раздел", diagnostics, ebrLba);
                     if (part != null) {
                         long partEnd = part.lastLbaInclusive() + 1;
                         if (part.firstLba() < base || partEnd > endExclusive) {
-                            diagnostics.add("Logical partition extends outside its containing extended partition.");
+                            diagnostics.add("Логический раздел выходит за границы содержащего его расширенного раздела.");
                         } else {
                             logical.add(part);
                         }
@@ -143,26 +144,26 @@ public final class MbrParser {
                 return;
             }
             if (!validBootFlag(link.bootFlag)) {
-                diagnostics.add("EBR link at LBA " + ebrLba + " has an invalid boot indicator.");
+                diagnostics.add("Ссылка EBR на LBA " + ebrLba + " имеет недопустимый признак загрузки.");
             }
             if (!isExtended(link.type)) {
-                diagnostics.add("EBR link entry is not an extended partition type.");
+                diagnostics.add("Запись ссылки EBR не имеет типа расширенного раздела.");
                 return;
             }
             try {
                 long nextEbrLba = Math.addExact(base, Integer.toUnsignedLong(link.startLba));
                 long linkEndLba = Math.addExact(nextEbrLba, Integer.toUnsignedLong(link.sectors));
                 if (link.sectors == 0 || nextEbrLba < base || linkEndLba > endExclusive) {
-                    diagnostics.add("EBR link extent is empty or outside its extended partition.");
+                    diagnostics.add("Область ссылки EBR пуста или выходит за границы расширенного раздела.");
                     return;
                 }
                 ebrLba = nextEbrLba;
             } catch (ArithmeticException e) {
-                diagnostics.add("EBR link extent overflows.");
+                diagnostics.add("Переполнение области ссылки EBR.");
                 return;
             }
         }
-        diagnostics.add("EBR chain exceeded the maximum of " + EBR_CHAIN_LIMIT + " records.");
+        diagnostics.add("Цепочка EBR превысила максимальное число записей: " + EBR_CHAIN_LIMIT + ".");
     }
 
     private static PartitionRecord toMbrRecord(
@@ -172,13 +173,13 @@ public final class MbrParser {
                 ? Integer.toUnsignedLong(entry.startLba) : entry.absoluteStartLba;
         long sectors = Integer.toUnsignedLong(entry.sectors);
         if (sectors == 0) {
-            diagnostics.add(source + " entry " + entryIndex + " has a zero sector count.");
+            diagnostics.add(source + " запись " + entryIndex + " содержит нулевое число секторов.");
             return null;
         }
         try {
             long endExclusive = Math.addExact(startLba, sectors);
             if (endExclusive > diskSectors) {
-                diagnostics.add(source + " entry " + entryIndex + " exceeds disk capacity.");
+                diagnostics.add(source + " запись " + entryIndex + " выходит за ёмкость диска.");
                 return null;
             }
             long startOffset = Math.multiplyExact(startLba, (long) sectorSize);
@@ -186,7 +187,7 @@ public final class MbrParser {
             return new PartitionRecord(source, startLba, endExclusive - 1, startOffset,
                     length, entry.bootFlag == 0x80, entry.type, "", "", 0, "");
         } catch (ArithmeticException e) {
-            diagnostics.add(source + " entry " + entryIndex + " has an overflowing range.");
+            diagnostics.add(source + " запись " + entryIndex + " содержит переполняющийся диапазон.");
             return null;
         }
     }
@@ -197,7 +198,7 @@ public final class MbrParser {
                 .sorted(java.util.Comparator.comparingLong(PartitionRecord::firstLba)).toList();
         for (int i = 1; i < primaryRanges.size(); i++) {
             if (primaryRanges.get(i).firstLba() <= primaryRanges.get(i - 1).lastLbaInclusive()) {
-                diagnostics.add("Overlapping primary partition ranges detected.");
+                diagnostics.add("Обнаружены пересекающиеся диапазоны основных разделов.");
             }
         }
 
@@ -211,7 +212,7 @@ public final class MbrParser {
         ranges.sort(java.util.Comparator.comparingLong(PartitionRecord::firstLba));
         for (int i = 1; i < ranges.size(); i++) {
             if (ranges.get(i).firstLba() <= ranges.get(i - 1).lastLbaInclusive()) {
-                diagnostics.add("Overlapping partition ranges detected.");
+                diagnostics.add("Обнаружены пересекающиеся диапазоны разделов.");
             }
         }
     }

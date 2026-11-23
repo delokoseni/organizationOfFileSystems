@@ -19,11 +19,11 @@ public final class VolumePartitionMappingService {
                 extentEnd = Math.addExact(extent.startingOffsetBytes(), extent.extentLengthBytes());
             } catch (ArithmeticException e) {
                 mappings.add(new ExtentPartitionMapping(extent, List.of(),
-                        "Volume extent range overflows"));
+                        "Границы дисковой области тома переполняются."));
                 continue;
             }
             if (extent.extentLengthBytes() == 0) {
-                mappings.add(new ExtentPartitionMapping(extent, List.of(), "Volume extent is empty"));
+                mappings.add(new ExtentPartitionMapping(extent, List.of(), "Дисковая область тома пуста."));
                 continue;
             }
 
@@ -33,8 +33,8 @@ public final class VolumePartitionMappingService {
                     .sorted(Comparator.comparingLong(WindowsPartitionInfo::startingOffsetBytes))
                     .toList();
             String diagnostic = candidates.size() == 1 ? ""
-                    : candidates.isEmpty() ? "Extent does not fit wholly inside a known partition"
-                    : "Extent maps ambiguously to multiple partitions";
+                    : candidates.isEmpty() ? "Дисковая область не помещается целиком в известный раздел."
+                    : "Дисковая область неоднозначно сопоставляется с несколькими разделами.";
             mappings.add(new ExtentPartitionMapping(extent, candidates, diagnostic));
         }
         return List.copyOf(mappings);

@@ -1,6 +1,7 @@
 package io.github.delokoseni.application;
 
 import io.github.delokoseni.controller.MainController;
+import io.github.delokoseni.util.UiMessages;
 import javafx.application.Application;
 import javafx.scene.Parent;
 import javafx.scene.Scene;
@@ -12,7 +13,7 @@ public final class DiskInspectorApplication extends Application {
         MainController controller = new MainController();
         Parent view = controller.createView();
         Scene scene = new Scene(view, 1100, 720);
-        stage.setTitle("File System Organization — Read-only Disk Inspector");
+        stage.setTitle(UiMessages.text("application.title"));
         stage.setMinWidth(900);
         stage.setMinHeight(620);
         stage.setScene(scene);

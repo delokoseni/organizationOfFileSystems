@@ -16,7 +16,7 @@ class DiagnosticServiceTest {
                 "Backup GPT header is missing.",
                 "Read completed."));
 
-        assertEquals(List.of(DiagnosticSeverity.ERROR, DiagnosticSeverity.WARNING,
+        assertEquals(List.of(DiagnosticSeverity.WARNING, DiagnosticSeverity.WARNING,
                 DiagnosticSeverity.INFORMATION), findings.stream().map(DiagnosticFinding::severity).toList());
         assertEquals("disk 3", findings.getFirst().scope());
     }
@@ -39,6 +39,30 @@ class DiagnosticServiceTest {
                 "NTFS_VOLUME_DATA_BUFFER is truncated: bytesReturned=95, required=96"));
 
         assertEquals(List.of(DiagnosticSeverity.WARNING, DiagnosticSeverity.ERROR),
+                findings.stream().map(DiagnosticFinding::severity).toList());
+    }
+
+    @Test
+    void treatsBackupGptCrcAsWarningAndUnavailablePhysicalSectorAsUnavailable() {
+        List<DiagnosticFinding> findings = service.classify("Физический диск 2", List.of(
+                "CRC32 массива разделов GPT (Резервная копия) недействительна",
+                "CRC32 заголовка GPT (Основная копия) недействительна",
+                "Размер физического сектора недоступен"));
+
+        assertEquals(List.of(DiagnosticSeverity.WARNING, DiagnosticSeverity.WARNING,
+                        DiagnosticSeverity.UNAVAILABLE),
+                findings.stream().map(DiagnosticFinding::severity).toList());
+    }
+
+    @Test
+    void treatsGptFailuresAsResidualWarningsWhenAValidMbrIsExplicitlyIdentified() {
+        List<DiagnosticFinding> findings = service.classify("Physical disk 2", List.of(
+                "Остаточные или несогласованные GPT-метаданные рядом с независимо "
+                        + "проверенной таблицей MBR: Нет копии GPT с действительными CRC.",
+                "Остаточные или несогласованные GPT-метаданные рядом с независимо "
+                        + "проверенной таблицей MBR: CRC32 массива разделов GPT (Резервная копия) недействительна"));
+
+        assertEquals(List.of(DiagnosticSeverity.WARNING, DiagnosticSeverity.WARNING),
                 findings.stream().map(DiagnosticFinding::severity).toList());
     }
 }

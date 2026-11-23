@@ -23,47 +23,54 @@ public final class GptParser {
         long diskSize = reader.getDiskSize();
         if (sectorSize < 512 || sectorSize > MAX_LOGICAL_SECTOR_SIZE
                 || diskSize < 0 || diskSize % sectorSize != 0) {
-            throw new IOException("Invalid disk geometry for GPT parsing");
+            throw new IOException("Недопустимая геометрия диска для разбора GPT.");
         }
         long diskSectors = diskSize / sectorSize;
         if (diskSectors < 3) {
-            throw new IOException("Disk is too small to contain GPT metadata");
+            throw new IOException("Диск слишком мал для размещения метаданных GPT.");
         }
 
         List<String> diagnostics = new ArrayList<>();
         byte[] mbr = reader.read(0, sectorSize);
-        boolean protectiveMbr = validSignature(mbr)
-                && hasProtectiveMbrEntry(mbr);
+        boolean protectiveMbr = isValidProtectiveMbr(mbr, diskSectors);
         if (!protectiveMbr) {
-            diagnostics.add("Protective MBR signature or partition type 0xEE is missing.");
+            diagnostics.add(protectiveMbrDiagnostic(mbr, diskSectors));
         }
 
-        GptData primaryData = readHeader(reader, 1, diskSectors, sectorSize, diagnostics, "Primary");
+        GptData primaryData = readHeader(reader, 1, diskSectors, sectorSize, diagnostics, "Основная копия");
         long lastLba = diskSectors - 1;
-        GptData backupData = readHeader(reader, lastLba, diskSectors, sectorSize, diagnostics, "Backup");
+        GptData backupData = readHeader(reader, lastLba, diskSectors, sectorSize, diagnostics, "Резервная копия");
 
         if (primaryData == null) {
-            diagnostics.add("Primary GPT header is missing or unreadable.");
+            diagnostics.add("Основной заголовок GPT отсутствует или не читается.");
         }
         if (backupData == null) {
-            diagnostics.add("Backup GPT header is missing or unreadable.");
+            diagnostics.add("Резервный заголовок GPT отсутствует или не читается.");
         }
         if (primaryData != null) {
-            validateHeaderLocations(primaryData.header, 1, lastLba, diskSectors, diagnostics, "Primary");
+            validateHeaderLocations(primaryData.header, 1, lastLba, diskSectors, diagnostics, "Основная копия");
         }
         if (backupData != null) {
-            validateHeaderLocations(backupData.header, lastLba, 1, diskSectors, diagnostics, "Backup");
+            validateHeaderLocations(backupData.header, lastLba, 1, diskSectors, diagnostics, "Резервная копия");
         }
+        boolean copiesConsistent = true;
         if (primaryData != null && backupData != null) {
             compareHeaders(primaryData, backupData, diagnostics);
+            copiesConsistent = headersConsistent(primaryData, backupData);
         }
 
-        GptData selected = primaryData != null && primaryData.header.structurallyValid()
-                ? primaryData
-                : backupData != null && backupData.header.structurallyValid() ? backupData : null;
-        if (selected == null && (primaryData != null || backupData != null)) {
-            diagnostics.add("No GPT copy with valid header and partition-array CRCs is available; "
-                    + "partition entries were not displayed.");
+        boolean primaryValid = primaryData != null && primaryData.header.validAt(
+                1, lastLba, diskSectors, sectorSize);
+        boolean backupValid = backupData != null && backupData.header.validAt(
+                lastLba, 1, diskSectors, sectorSize);
+        GptData selected = copiesConsistent && primaryValid ? primaryData
+                : copiesConsistent && backupValid ? backupData : null;
+        if (selected == null && !primaryValid && !backupValid) {
+            diagnostics.add("Нет копии GPT с действительными CRC заголовка и массива разделов; "
+                    + "проверенными расположениями и допустимой геометрией; записи разделов не отображаются.");
+        } else if (selected == null) {
+            diagnostics.add("Копии GPT содержат противоречивые подтверждённые сведения; "
+                    + "записи разделов не отображаются.");
         }
         List<PartitionRecord> partitions = selected == null
                 ? List.of() : decodePartitions(selected, sectorSize, diskSectors, diagnostics);
@@ -80,11 +87,11 @@ public final class GptParser {
         try {
             sector = reader.read(Math.multiplyExact(headerLba, (long) sectorSize), sectorSize);
         } catch (IOException | ArithmeticException e) {
-            diagnostics.add(label + " GPT header read failed: " + e.getMessage());
+            diagnostics.add("Не удалось прочитать заголовок GPT (" + label + "): " + e.getMessage());
             return null;
         }
         if (!hasSignature(sector, 0)) {
-            diagnostics.add(label + " GPT signature is missing at LBA " + headerLba + ".");
+            diagnostics.add("Сигнатура GPT (" + label + ") отсутствует на LBA " + headerLba + ".");
             return null;
         }
 
@@ -111,7 +118,7 @@ public final class GptParser {
             entrySize = u32(sector, 84);
             storedArrayCrc = u32(sector, 88);
         } catch (IllegalArgumentException e) {
-            diagnostics.add(label + " GPT header contains an unsupported unsigned 64-bit value: "
+            diagnostics.add("Заголовок GPT (" + label + ") содержит неподдерживаемое беззнаковое 64-разрядное значение: "
                     + e.getMessage());
             return null;
         }
@@ -122,10 +129,10 @@ public final class GptParser {
             Arrays.fill(headerBytes, 16, 20, (byte) 0);
             headerCrcValid = InMemoryChecksums.crc32(headerBytes) == storedHeaderCrc;
         } else {
-            diagnostics.add(label + " GPT header size is outside the valid sector bounds.");
+            diagnostics.add("Размер заголовка GPT (" + label + ") выходит за допустимые границы сектора.");
         }
         if (!headerCrcValid) {
-            diagnostics.add(label + " GPT header CRC32 is invalid.");
+            diagnostics.add("CRC32 заголовка GPT (" + label + ") недействительна.");
         }
 
         byte[] entryArray = null;
@@ -137,24 +144,26 @@ public final class GptParser {
             if (entryCount == 0 || entryCount > MAX_ENTRY_COUNT
                     || entrySize < ENTRY_MIN_SIZE || entrySize % 8 != 0
                     || arrayLength > MAX_ENTRY_ARRAY_BYTES || arrayLength > Integer.MAX_VALUE) {
-                diagnostics.add(label + " GPT partition entry count or size exceeds parser limits.");
+                diagnostics.add("Число или размер записей разделов GPT (" + label
+                        + ") превышает пределы анализатора.");
             } else if (entriesLba == 0 || arrayEndLba > diskSectors
                     || entriesLba <= headerLba && headerLba < arrayEndLba) {
-                diagnostics.add(label + " GPT partition entry array is outside disk bounds or overlaps its header.");
+                diagnostics.add("Массив записей разделов GPT (" + label
+                        + ") выходит за границы диска или перекрывает заголовок.");
             } else {
                 if (headerLba == 1 && arrayEndLba > firstUsable
                         || headerLba == diskSectors - 1 && entriesLba <= lastUsable) {
-                    diagnostics.add(label + " GPT partition entry array overlaps the usable LBA range.");
+                    diagnostics.add("Массив записей разделов GPT (" + label + ") перекрывает допустимый диапазон LBA.");
                 }
                 entryArray = reader.read(Math.multiplyExact(entriesLba, (long) sectorSize),
                         Math.toIntExact(arrayLength));
                 arrayCrcValid = InMemoryChecksums.crc32(entryArray) == storedArrayCrc;
                 if (!arrayCrcValid) {
-                    diagnostics.add(label + " GPT partition array CRC32 is invalid.");
+                    diagnostics.add("CRC32 массива разделов GPT (" + label + ") недействительна.");
                 }
             }
         } catch (IOException | ArithmeticException e) {
-            diagnostics.add(label + " GPT partition array could not be read safely: " + e.getMessage());
+            diagnostics.add("Не удалось безопасно прочитать массив разделов GPT (" + label + "): " + e.getMessage());
         }
 
         GptHeaderInfo info = new GptHeaderInfo(headerLba, true, headerCrcValid, revision, headerSize,
@@ -168,13 +177,13 @@ public final class GptParser {
             GptHeaderInfo header, long expectedCurrentLba, long expectedBackupLba,
             long diskSectors, List<String> diagnostics, String label) {
         if (header.currentLba() != expectedCurrentLba || header.lba() != expectedCurrentLba) {
-            diagnostics.add(label + " GPT header is at or reports an incorrect current LBA.");
+            diagnostics.add("Заголовок GPT (" + label + ") расположен на неверном LBA или содержит неверный текущий LBA.");
         }
         if (header.backupLba() != expectedBackupLba) {
-            diagnostics.add(label + " GPT header reports an incorrect backup LBA.");
+            diagnostics.add("Заголовок GPT (" + label + ") содержит неверный резервный LBA.");
         }
         if (header.backupLba() >= diskSectors) {
-            diagnostics.add(label + " GPT backup LBA lies outside disk capacity.");
+            diagnostics.add("Резервный LBA заголовка GPT (" + label + ") выходит за ёмкость диска.");
         }
     }
 
@@ -184,25 +193,45 @@ public final class GptParser {
                 || header.lastUsableLba() >= diskSectors
                 || header.firstUsableLba() <= 1
                 || header.lastUsableLba() >= diskSectors - 1) {
-            diagnostics.add(label + " GPT usable LBA range is invalid.");
+            diagnostics.add("Недопустимый диапазон доступных LBA в GPT (" + label + ").");
         }
     }
 
     private static void compareHeaders(GptData primary, GptData backup, List<String> diagnostics) {
         GptHeaderInfo p = primary.header;
         GptHeaderInfo b = backup.header;
+        if (!p.headerCrcValid() || !b.headerCrcValid()) {
+            return;
+        }
         if (!p.diskGuid().equalsIgnoreCase(b.diskGuid())) {
-            diagnostics.add("Primary and backup GPT disk GUIDs differ.");
+            diagnostics.add("GUID диска в основной и резервной копиях GPT различаются.");
         }
         if (p.firstUsableLba() != b.firstUsableLba() || p.lastUsableLba() != b.lastUsableLba()) {
-            diagnostics.add("Primary and backup GPT usable LBA ranges differ.");
+            diagnostics.add("Диапазоны доступных LBA в основной и резервной копиях GPT различаются.");
         }
         if (p.entryCount() != b.entryCount() || p.entrySize() != b.entrySize()) {
-            diagnostics.add("Primary and backup GPT partition entry dimensions differ.");
-        } else if (primary.entries != null && backup.entries != null
+            diagnostics.add("Размеры записей разделов в основной и резервной копиях GPT различаются.");
+        } else if (p.arrayCrcValid() && b.arrayCrcValid()
+                && primary.entries != null && backup.entries != null
                 && !Arrays.equals(primary.entries, backup.entries)) {
-            diagnostics.add("Primary and backup GPT partition entries differ.");
+            diagnostics.add("Записи разделов в основной и резервной копиях GPT различаются.");
         }
+    }
+
+    private static boolean headersConsistent(GptData primary, GptData backup) {
+        GptHeaderInfo p = primary.header;
+        GptHeaderInfo b = backup.header;
+        if (p.headerCrcValid() && b.headerCrcValid()
+                && (!p.diskGuid().equalsIgnoreCase(b.diskGuid())
+                || p.firstUsableLba() != b.firstUsableLba()
+                || p.lastUsableLba() != b.lastUsableLba()
+                || p.entryCount() != b.entryCount()
+                || p.entrySize() != b.entrySize())) {
+            return false;
+        }
+        return !(p.arrayCrcValid() && b.arrayCrcValid()
+                && primary.entries != null && backup.entries != null
+                && !Arrays.equals(primary.entries, backup.entries));
     }
 
     private static List<PartitionRecord> decodePartitions(
@@ -226,7 +255,7 @@ public final class GptParser {
                 long attributes = u64Bits(data.entries, offset + 48);
                 if (first > last || first < data.header.firstUsableLba()
                         || last > data.header.lastUsableLba() || last >= diskSectors) {
-                    diagnostics.add("GPT partition entry " + (i + 1) + " has invalid LBA boundaries.");
+                    diagnostics.add("Запись раздела GPT " + (i + 1) + " содержит недопустимые границы LBA.");
                     continue;
                 }
                 long startOffset = Math.multiplyExact(first, (long) sectorSize);
@@ -235,10 +264,10 @@ public final class GptParser {
                 String name = entrySize > 56
                         ? new String(data.entries, offset + 56, entrySize - 56,
                         StandardCharsets.UTF_16LE).replace("\u0000", "").trim() : "";
-                partitions.add(new PartitionRecord("GPT " + (i + 1), first, last,
+                partitions.add(new PartitionRecord("Раздел GPT " + (i + 1), first, last,
                         startOffset, length, false, 0, typeGuid, uniqueGuid, attributes, name));
             } catch (ArithmeticException | IllegalArgumentException e) {
-                diagnostics.add("GPT partition entry " + (i + 1) + " contains invalid or overflowing values.");
+                diagnostics.add("Запись раздела GPT " + (i + 1) + " содержит недопустимые значения или переполнение.");
             }
         }
         validatePartitionOverlaps(partitions, diagnostics);
@@ -250,19 +279,62 @@ public final class GptParser {
                 .sorted(java.util.Comparator.comparingLong(PartitionRecord::firstLba)).toList();
         for (int i = 1; i < ordered.size(); i++) {
             if (ordered.get(i).firstLba() <= ordered.get(i - 1).lastLbaInclusive()) {
-                diagnostics.add("Overlapping GPT partition ranges detected.");
+                diagnostics.add("Обнаружены пересекающиеся диапазоны разделов GPT.");
             }
         }
     }
 
-    private static boolean hasProtectiveMbrEntry(byte[] mbr) {
+    private static boolean isValidProtectiveMbr(byte[] mbr, long diskSectors) {
+        if (!validSignature(mbr) || diskSectors < 2) {
+            return false;
+        }
+        int protectiveCount = 0;
         for (int i = 0; i < 4; i++) {
-            int typeOffset = 446 + i * 16 + 4;
-            if ((mbr[typeOffset] & 0xff) == 0xee) {
-                return true;
+            int offset = 446 + i * 16;
+            if ((mbr[offset + 4] & 0xff) != 0xee) {
+                continue;
+            }
+            protectiveCount++;
+            long firstLba = u32(mbr, offset + 8);
+            long sectors = u32(mbr, offset + 12);
+            long expectedSectors = Math.min(diskSectors - 1, 0xffff_ffffL);
+            if (firstLba != 1 || sectors != expectedSectors) {
+                return false;
             }
         }
-        return false;
+        return protectiveCount == 1;
+    }
+
+    private static String protectiveMbrDiagnostic(byte[] mbr, long diskSectors) {
+        if (!validSignature(mbr)) {
+            return "Защитная запись MBR 0xEE не проверена: подпись MBR 0x55AA отсутствует.";
+        }
+        int count = 0;
+        int entryOffset = -1;
+        for (int i = 0; i < 4; i++) {
+            int offset = 446 + i * 16;
+            if ((mbr[offset + 4] & 0xff) == 0xee) {
+                count++;
+                entryOffset = offset;
+            }
+        }
+        if (count == 0) {
+            return "Защитная запись MBR типа 0xEE отсутствует.";
+        }
+        if (count != 1) {
+            return "Обнаружено несколько защитных записей MBR типа 0xEE (" + count + ").";
+        }
+        long startLba = u32(mbr, entryOffset + 8);
+        long sectors = u32(mbr, entryOffset + 12);
+        long expectedSectors = Math.min(diskSectors - 1, 0xffff_ffffL);
+        if (startLba != 1 || sectors != expectedSectors) {
+            long lastLba = sectors == 0 ? startLba : startLba + sectors - 1;
+            long expectedLastLba = expectedSectors;
+            return "Защитная запись MBR 0xEE присутствует, но задаёт диапазон LBA ["
+                    + startLba + ", " + lastLba + "]; ожидается [1, " + expectedLastLba
+                    + "] для геометрии диска (" + diskSectors + " логических секторов).";
+        }
+        return "Защитная запись MBR 0xEE недействительна.";
     }
 
     private static boolean validSignature(byte[] bytes) {
@@ -322,7 +394,7 @@ public final class GptParser {
         long high = u32(bytes, offset + 4);
         long value = (high << 32) | low;
         if (value < 0) {
-            throw new IllegalArgumentException("unsigned LBA exceeds signed 64-bit range");
+            throw new IllegalArgumentException("Беззнаковый LBA превышает знаковый 64-разрядный диапазон.");
         }
         return value;
     }
